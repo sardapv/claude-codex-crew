@@ -15,11 +15,10 @@ Run a team of AI models from Claude Code. The team spans a Claude subscription a
 
 ## The default crew
 
-| Tier | Member | Vendor | Model | Effort | Gets |
+| Tier | Member | Uses | Model | Effort | Gets |
 | --- | --- | --- | --- | --- | --- |
-| 0 CTO | Fable | Claude | claude-fable-5-2 | xhigh | Only problems that the Boss and the Advisor both failed to solve |
 | 1 Boss | Opus | Claude | claude-opus-5-5 | high | Planning, decisions and the final check |
-| 1 Advisor | Astra | Codex | gpt-6.2-astra | high | Second opinions on risky calls |
+| 1 Co-boss | Astra | Codex | gpt-6.2-astra | high | Talks every hard call through with Opus |
 | 2 Lead | Sonnet | Claude | claude-sonnet-5-5 | high | Building, analysis, and review of junior work |
 | 2 Lead | Sol | Codex | gpt-6.1-sol | high | Building and planning |
 | 3 Specialist | Terra | Codex | gpt-6.1-terra | medium | Clear tasks with fixed limits |
@@ -45,7 +44,9 @@ Before multi-step work, Claude posts a Crew plan table. The mod also draws a car
 
 The crew adds no cost of its own. It runs on the Claude and Codex subscriptions you already have, and each delegation uses that member's model and effort from that subscription's usage.
 
-Sending routine work to cheaper members (Haiku, Luna, Terra) is the point. It saves your Claude usage for work that needs it. Fable, the CTO, is the most expensive member. It runs only when Opus and Astra have both tried and failed, and Claude must say why before it calls Fable.
+Sending routine work to cheaper members (Haiku, Luna, Terra) is the point. It saves your Claude usage for work that needs it.
+
+The crew has two bosses and no CTO, so it works on plans that don't include the most expensive models. Opus leads. When a task is complex, risky or uncertain, Opus asks Astra (on your Codex plan) for its view before deciding. If they disagree, Opus decides and tells you both positions. Routine work never goes to Astra.
 
 To spend less on any member, lower its effort or pick a cheaper model in the panel.
 

@@ -38,11 +38,9 @@ async function loadConfig($: EngineInterface): Promise<void> {
 const PANE = 'crew'
 const STORE_KEY = 'members-v1'
 
-const FABLE: Member = { id: 'fable', name: 'Fable', vendor: 'claude', model: 'claude-fable-5-2', tier: 0, effort: 'xhigh', badge: 'CTO', role: 'Expert, only when Opus and Astra both fail' }
-const ASTRA: Member = { id: 'astra', name: 'Astra', vendor: 'codex', model: 'gpt-6.2-astra', tier: 1, effort: 'high', badge: 'Advisor', role: 'Second opinion when Opus asks' }
+const ASTRA: Member = { id: 'astra', name: 'Astra', vendor: 'codex', model: 'gpt-6.2-astra', tier: 1, effort: 'high', badge: 'Co-boss', role: 'Talks hard calls through with Opus' }
 
 const DEFAULTS: Member[] = [
-  FABLE,
   { id: 'opus', name: 'Opus', vendor: 'claude', model: 'claude-opus-5-5', tier: 1, effort: 'high', badge: 'Boss', role: 'Plans, decides, final check' },
   ASTRA,
   { id: 'sonnet', name: 'Sonnet', vendor: 'claude', model: 'claude-sonnet-5-5', tier: 2, effort: 'high', role: 'Builds, analyses, reviews juniors' },
@@ -53,7 +51,7 @@ const DEFAULTS: Member[] = [
 ]
 
 const MODELS: Record<Vendor, string[]> = {
-  claude: ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5', 'claude-haiku-5-5'],
+  claude: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'],
   codex: ['gpt-6.2-sol', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6.2-astra', 'gpt-6.1-terra', 'gpt-5.6-terra', 'gpt-6-luna', 'gpt-5.6-luna'],
 }
 
@@ -200,6 +198,28 @@ const toolsRule = (cfg: CrewConfig) => {
   return parts.join(' ')
 }
 
+/** Rule 1, from who is at the top: the Boss, its Co-boss, and a CTO only if the crew has one. */
+const chainRule = (list: Member[]) => {
+  const top = list.filter(m => m.tier <= 1)
+  const boss = top.find(m => m.badge === 'Boss') ?? top.find(m => m.vendor === 'claude' && m.tier === 1)
+  const partner = top.find(m => m.tier === 1 && m.id !== boss?.id)
+  const cto = list.find(m => m.tier === 0)
+  const parts = [
+    `1. Chain of command. The Boss${boss ? ` (${boss.name})` : ''} plans, makes the decisions and gives the final check.`,
+  ]
+  if (partner) {
+    parts.push(
+      `${partner.name} is the Co-boss, an equal partner for hard calls. When a task is complex, risky or uncertain (a design choice, a stubborn bug, a plan worth challenging, anything you are not sure of), the Boss asks ${partner.name} for its view before deciding, with the full context in the brief. Weigh both views. If they disagree, the Boss decides and tells the user both positions in a sentence each. Do not consult ${partner.name} on routine work.`,
+    )
+  }
+  if (cto) {
+    parts.push(
+      `${cto.name} (tier 0, CTO) is the last resort: call it only when the Boss${partner ? ` and ${partner.name}` : ''} have tried and failed or still disagree on a hard problem, and say why before calling it. Never send routine work to ${cto.name}.`,
+    )
+  }
+  return parts.join(' ')
+}
+
 const routingText = (list: Member[], cfg: CrewConfig = DEFAULT_CONFIG) => {
   const sorted = [...list].sort((a, b) => a.tier - b.tier)
   const roster = sorted
@@ -210,7 +230,7 @@ const routingText = (list: Member[], cfg: CrewConfig = DEFAULT_CONFIG) => {
     'The user works with a fixed team spread over one Claude and one Codex subscription. Use it to save cost, never at the cost of quality. The user has asked that delegated work run at the efforts listed here.',
     roster,
     'Rules:',
-    '1. Chain of command. The tier-1 Boss plans, makes hard decisions and gives the final check. The tier-1 Advisor gives a second opinion when the Boss asks for one (a risky design call, a stubborn bug, a plan worth challenging). The tier-0 CTO is the last resort: call it only when the Boss and the Advisor have both tried and failed, or disagree on a hard problem, and say why before calling it. Never send routine work to the CTO.',
+    chainRule(list),
     '2. Route the rest by difficulty: mid-level work to tier 2, clear bounded work to tier 3. Tier 4 (the juniors) gets only zero-judgment chores: work whose every step and exact output you already know, so there is nothing to decide and no mistake that would matter. Examples: fill a template you wrote, rename or move files you listed, reformat text, run a command you wrote word for word, list or count what you named. If a task needs any choice (which file, which query, which approach, what a result means), or a mistake would cost something, it goes to tier 3 or higher. When unsure, it is not a junior task.',
     '3. Quality first. Junior output (tiers 3-4) never counts until a tier-2 or higher member has checked it. Risky, ambiguous or security-sensitive work never goes below tier 2. A failed task goes up a tier, never down.',
     '4. Juniors forget context: give them a short, complete brief with the goal, exact steps, files, what done looks like and what not to touch.',
@@ -415,13 +435,27 @@ export const register: Register = on => {
       await update($, members, l => {
         const withBadge = l.map(m => (m.id === 'opus' && !m.badge ? { ...m, badge: 'Boss', role: m.role.replace(/^Boss: ?/, '') } : m))
         const has = (id: string) => withBadge.some(m => m.id === id)
-        const out = has('fable') ? withBadge : [FABLE, ...withBadge]
+        const out = withBadge
         if (has('astra')) return out
         const at = out.findIndex(m => m.id === 'opus')
         return at < 0 ? [...out, ASTRA] : [...out.slice(0, at + 1), ASTRA, ...out.slice(at + 1)]
       })
       await $.store.set(STORE_KEY, await read($, members))
       await $.store.set('cto-astra', true)
+    }
+    // One-time move to two bosses: Fable leaves (not on every plan), Astra becomes Co-boss, unless renamed.
+    if (!(await $.store.get('two-bosses'))) {
+      await update($, members, l =>
+        l
+          .filter(m => m.id !== 'fable')
+          .map(m =>
+            m.id === 'astra' && (m.badge ?? 'Advisor') === 'Advisor'
+              ? { ...m, badge: 'Co-boss', role: m.role === 'Second opinion when Opus asks' ? ASTRA.role : m.role }
+              : m,
+          ),
+      )
+      if (!ownChanges) await $.store.set(STORE_KEY, await read($, members))
+      await $.store.set('two-bosses', true)
     }
     const savedPerms = await $.store.get(PERMS_KEY)
     if (!ownChanges && savedPerms && typeof savedPerms === 'object') {

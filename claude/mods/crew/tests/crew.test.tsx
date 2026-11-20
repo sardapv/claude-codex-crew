@@ -20,7 +20,7 @@ test('the pane shows every member, on every surface', async ($, on) => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
-  const names = ['Fable', 'Opus', 'Astra', 'Sonnet', 'Sol', 'Terra', 'Luna', 'Haiku']
+  const names = ['Opus', 'Astra', 'Sonnet', 'Sol', 'Terra', 'Luna', 'Haiku']
 
   const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
   for (const name of names) {
@@ -325,6 +325,30 @@ test("the lead's card shows the session's live effort, not its saved one", async
   expect(now).not.toContain('>high<')
 })
 
+test('Opus asking Astra, side by side on the same tier, still lights a line between them', async ($, on) => {
+  let during = ''
+  let chartSource = async () => ''
+  on('tool.call', async () => {
+    during = await chartSource()
+    return { result: { stdout: 'ok', stderr: '', interrupted: false } }
+  })
+  mock.store(on)
+  mock.clock(on)
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  chartSource = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const chart = (await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined
+    await ui.unmount()
+    return chart?.props?.source ?? ''
+  }
+  await $.tool.call({ tool: 'Bash', command: 'codex exec -m gpt-6.2-astra "second opinion"' } as never)
+  expect(during).toContain('class="route command"')
+  expect(await chartSource()).toContain('class="route report"')
+})
+
 test('a Sonnet chat: its live effort goes on Sonnet, and edits stay in this chat until saved', async ($, on) => {
   const store: Record<string, unknown> = {}
   on('store.get', (_, e) => ({ value: store[(e as { key: string }).key] }) as never)
@@ -419,4 +443,38 @@ test('only the services in crew.json are guarded, shown and named in the rules',
   expect(rules).toContain('including Supabase.')
   expect(rules).toContain('Codex is not set up')
   expect(rules).not.toContain('Shopify')
+})
+
+test('two bosses: a saved crew loses Fable, Astra becomes Co-boss, and the rules say so', async ($, on) => {
+  const old = [
+    { id: 'fable', name: 'Fable', vendor: 'claude', model: 'claude-fable-5-2', tier: 0, effort: 'xhigh', badge: 'CTO', role: 'Expert' },
+    { id: 'opus', name: 'Opus', vendor: 'claude', model: 'claude-opus-5-5', tier: 1, effort: 'high', badge: 'Boss', role: 'Plans, decides, final check' },
+    { id: 'astra', name: 'Astra', vendor: 'codex', model: 'gpt-6.2-astra', tier: 1, effort: 'high', badge: 'Advisor', role: 'Second opinion when Opus asks' },
+    { id: 'terra', name: 'Terra', vendor: 'codex', model: 'gpt-6.1-terra', tier: 3, effort: 'low', role: 'Clear, bounded tasks' },
+  ]
+  const store: Record<string, unknown> = { 'members-v1': old, 'juniors-xhigh': true, 'junior-roles': true, 'cto-astra': true }
+  on('store.get', (_, e) => ({ value: store[(e as { key: string }).key] }) as never)
+  on('store.set', (_, e) => {
+    const { key, value } = e as { key: string; value: unknown }
+    store[key] = value
+    return { value: {} } as never
+  })
+  mock.env(on, { HOME: '/home/test' })
+  on('fs.read', () => ({ value: '' }))
+  on('prompt.compose', () => ({ sections: [] }))
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const saved = store['members-v1'] as { id: string; badge?: string; effort: string }[]
+  expect(saved.some(m => m.id === 'fable')).toBe(false)
+  expect(saved.find(m => m.id === 'astra')?.badge).toBe('Co-boss')
+  expect(saved.find(m => m.id === 'terra')?.effort).toBe('low') // other edits kept
+
+  const { sections } = await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [] } as never)
+  const rules = sections.find(s => s.id === 'crew:routing')?.text ?? ''
+  expect(rules).toContain('Astra is the Co-boss')
+  expect(rules).not.toContain('CTO')
+  expect(rules).not.toContain('Fable')
 })

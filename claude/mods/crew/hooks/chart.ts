@@ -171,9 +171,19 @@ function descent(upper: Placed, lower: Placed, rows: Placed[][]): Pt[] {
   return pts
 }
 
+/** Between two members of the same tier (Opus asking Astra): down, across the bus below the row, and back up. */
+function across(from: Placed, to: Placed): Pt[] {
+  const bottom = from.y + NODE_H
+  const bus = bottom + ROW_GAP / 2
+  return [[mid(from), bottom], [mid(from), bus], [mid(to), bus], [mid(to), bottom]]
+}
+
 function traffic(from: Placed, to: Placed, rows: Placed[][], phase: Route['phase']): string {
-  if (from.row === to.row) return ''
-  const down = from.row < to.row ? descent(from, to, rows) : descent(to, from, rows).reverse()
+  if (from.m.id === to.m.id) return ''
+  const down =
+    from.row === to.row
+      ? across(from, to)
+      : from.row < to.row ? descent(from, to, rows) : descent(to, from, rows).reverse()
   const pts = phase === 'command' ? down : [...down].reverse()
   const d = rounded(pts)
   const length = pts.slice(1).reduce((s, p, i) => s + Math.hypot(p[0] - pts[i]![0], p[1] - pts[i]![1]), 0)
