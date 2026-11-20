@@ -1,0 +1,178 @@
+import { expect, mock, test } from 'claude-code/testing'
+
+const PANE = {
+  plugin: 'crew',
+  component: 'Pane',
+  requestId: 'crew',
+  props: {
+    title: 'Crew',
+    isFocused: false,
+    bodyColumns: 80,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows: 40 },
+    view: {},
+  },
+} as const
+
+test('the pane shows every member, on every surface', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const names = ['Fable', 'Opus', 'Astra', 'Sonnet', 'Sol', 'Terra', 'Luna', 'Haiku']
+
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  for (const name of names) {
+    expect(await term.find({ type: 'Text', text: new RegExp(name) })).toBeTruthy()
+  }
+  await term.unmount()
+
+  for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const chart = (await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined
+    const source = chart?.props?.source ?? ''
+    for (const name of names) expect(source).toContain(`>${name}<`)
+    await ui.unmount()
+  }
+})
+
+test('a Haiku subagent gets the crew effort when none is given', async ($, on) => {
+  let seen: unknown
+  on('tool.call', (_, e) => {
+    seen = (e as { effort?: string }).effort
+    return { result: {} }
+  })
+  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y', model: 'haiku' })
+  expect(seen).toBe('xhigh')
+})
+
+test('a codex exec command gets the crew effort added', async ($, on) => {
+  let seen = ''
+  on('tool.call', (_, e) => {
+    seen = (e as { command: string }).command
+    return { result: {} }
+  })
+  await $.tool.call({ tool: 'Bash', command: 'codex exec -m gpt-6-luna "do x"' })
+  expect(seen).toBe('codex exec -c model_reasoning_effort=xhigh -m gpt-6-luna "do x"')
+})
+
+test('the words inside a string are left alone, a chained call is not', async ($, on) => {
+  const seen: string[] = []
+  on('tool.call', (_, e) => {
+    seen.push((e as { command: string }).command)
+    return { result: {} }
+  })
+  const inText = `python3 - <<'PY'\nprint("run codex exec later")\nPY`
+  await $.tool.call({ tool: 'Bash', command: inText })
+  await $.tool.call({ tool: 'Bash', command: 'cd /tmp && codex exec -m gpt-6-luna "x"' })
+  expect(seen[0]).toBe(inText)
+  expect(seen[1]).toBe('cd /tmp && codex exec -c model_reasoning_effort=xhigh -m gpt-6-luna "x"')
+})
+
+test('reads pass and writes ask, per service', async ($, on) => {
+  // A call the crew lets pass reaches this hook; one it stops to ask about does not.
+  let reached = false
+  on('classic.PreToolUse', () => {
+    reached = true
+    return {} as never
+  })
+  on('tool.call', () => ({ result: { ok: true } }))
+  // Made-up connector ids, read at session start from ~/.claude/crew-connectors.json.
+  mock.env(on, { HOME: '/home/test' })
+  mock.store(on)
+  let readPath = ''
+  on('fs.read', (_, e) => {
+    readPath = e.path
+    return { value: JSON.stringify({ 'test-shop-id': 'shopify', 'test-posthog-id': 'posthog', 'test-supabase-id': 'supabase', x: 'nope' }) }
+  })
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(readPath).toBe('/home/test/.claude/crew-connectors.json')
+  const ph = 'mcp__test-posthog-id__exec'
+  const sb = 'mcp__test-supabase-id__execute_sql'
+  const sh = 'mcp__test-shop-id__'
+  const cf = 'mcp__plugin_cloudflare_cloudflare__execute'
+
+  const passes = async (tool: string, input: Record<string, unknown>) => {
+    reached = false
+    await $.tool.call({ tool, ...input } as never)
+    return reached
+  }
+
+  expect(await passes(ph, { command: 'call project-get {}', context: 'x' })).toBe(true)
+  expect(await passes(ph, { command: 'call execute-sql {"query":"select 1"}', context: 'x' })).toBe(true)
+  expect(await passes(ph, { command: 'call feature-flag-update {"id":1}', context: 'x' })).toBe(false)
+  expect(await passes(ph, { command: 'call --confirm feature-flag-delete {"id":1}', context: 'x' })).toBe(false)
+  expect(await passes(sb, { project_id: 'p', query: 'select * from t' })).toBe(true)
+  expect(await passes(sb, { project_id: 'p', query: 'delete from t' })).toBe(false)
+  expect(await passes(`${sh}get-shop-info`, {})).toBe(true)
+  expect(await passes(`${sh}update-product`, { id: '1' })).toBe(false)
+  expect(await passes(cf, { code: 'await cloudflare.request({ method: "GET", path: "/zones" })' })).toBe(true)
+  expect(await passes(cf, { code: 'await cloudflare.request({ method: "DELETE", path: "/zones/1" })' })).toBe(false)
+  expect(await passes('Bash', { command: 'ls' })).toBe(true)
+})
+
+test('a delegation lights a command line, then a report line; idle draws none', async ($, on) => {
+  let during = ''
+  let chartSource = async () => ''
+  on('tool.call', async () => {
+    during = await chartSource()
+    return { result: {} }
+  })
+  mock.store(on)
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  chartSource = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const chart = (await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined
+    await ui.unmount()
+    return chart?.props?.source ?? ''
+  }
+
+  expect(await chartSource()).not.toContain('class="route')
+
+  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y', model: 'haiku', effort: 'xhigh' })
+  expect(during).toContain('class="route command"')
+  expect(during).toContain('WORKING')
+  expect(await chartSource()).toContain('class="route report"')
+  expect(await chartSource()).toContain('REPORTED')
+  await clock.advance(4000)
+  expect(await chartSource()).not.toContain('class="route')
+})
+
+test('a background subagent stays lit until its own turn ends', async ($, on) => {
+  on('tool.call', () => ({
+    result: { status: 'async_launched', agentId: 'bg-1', description: 'x', prompt: 'y' },
+  }) as never)
+  mock.store(on)
+  mock.clock(on)
+  on('classic.SubagentStop', () => ({}) as never)
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const chartSource = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const chart = (await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined
+    await ui.unmount()
+    return chart?.props?.source ?? ''
+  }
+
+  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y', model: 'haiku', effort: 'xhigh' })
+  const launched = await chartSource()
+  expect(launched).toContain('class="route command"')
+  expect(launched).not.toContain('class="route report"')
+
+  await $.classic.SubagentStop({ agent_id: 'bg-1', agent_type: 'general-purpose', agent_transcript_path: '', stop_hook_active: false } as never)
+  const after = await chartSource()
+  expect(after).toContain('class="route report"')
+  expect(after).not.toContain('class="route command"')
+})

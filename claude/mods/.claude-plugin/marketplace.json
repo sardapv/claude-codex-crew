@@ -1,0 +1,7 @@
+{
+  "name": "local-mods",
+  "owner": { "name": "local" },
+  "plugins": [
+    { "name": "crew", "source": "./crew", "description": "Your AI crew as a live org chart: who commands whom, effort per member, service access." }
+  ]
+}

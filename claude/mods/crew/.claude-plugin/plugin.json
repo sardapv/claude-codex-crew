@@ -1,0 +1,6 @@
+{
+  "name": "crew",
+  "version": "0.1.0",
+  "description": "Your AI team as a live org chart: who does what, on which model and effort, across Claude and Codex.",
+  "types": "./types/index.d.ts"
+}
