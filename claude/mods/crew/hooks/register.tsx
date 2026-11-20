@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Effort, Member, PermMode, Route, Service, Vendor } from '../types'
+import type { Call, Effort, Member, PermMode, Route, Service, Vendor } from '../types'
 
 import { crewChart, EFFORTS, meter, TIER_NAMES } from './chart'
 import {
@@ -73,7 +73,8 @@ const selected = atom({ plugin: 'crew', key: 'selected' } as const, '')
 const active = atom({ plugin: 'crew', key: 'active' } as const, {} as Record<string, number>)
 const confirmReset = atom({ plugin: 'crew', key: 'confirmReset' } as const, false)
 const routes = atom({ plugin: 'crew', key: 'routes' } as const, {} as Record<string, Route>)
-const agents = atom({ plugin: 'crew', key: 'agents' } as const, {} as Record<string, { member: string; running: boolean }>)
+const agents = atom({ plugin: 'crew', key: 'agents' } as const, {} as Record<string, { member: string; running: boolean; useId?: string }>)
+const calls = atom({ plugin: 'crew', key: 'calls' } as const, {} as Record<string, Call>)
 
 /** How long a finished member's report-back line stays lit. */
 const REPORT_MS = 3500
@@ -107,6 +108,32 @@ const memberForCodex = (list: Member[], command: string) => {
   return model
     ? codex.find(m => m.model === model)
     : codex.find(m => m.id === 'sol') ?? codex[0]
+}
+
+/** One line of a task, for a card: its first line, trimmed to fit. */
+const brief = (text: string | undefined, max = 90) => {
+  const line = (text ?? '').trim().split('\n')[0] ?? ''
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/** A Codex run's task: the Bash call's description, else the brief in the command's last quoted string. */
+const codexTask = (input: { description?: string; command?: string }) => {
+  if (input.description) return brief(input.description)
+  const quoted = [...(input.command ?? '').matchAll(/"((?:[^"\\]|\\.)*)"/g)].pop()?.[1]
+  return brief(quoted ?? 'Codex run')
+}
+
+const useIdOf = (e: unknown) => (e as { tool_use_id?: string }).tool_use_id || undefined
+
+const REPORT_COLOR = '#5AA9F0'
+
+/** The card's status: from the crew's own record when there is one, else from the row. */
+const cardStatus = (p: { isRunning: boolean; isErrored: boolean; isInterrupted: boolean }, rec: Call | undefined) => {
+  if (p.isInterrupted) return { text: 'Interrupted', color: 'warning' }
+  if (p.isErrored) return { text: 'Failed', color: 'error' }
+  if (rec?.end) return { text: `✓ Reported · ${Math.max(1, Math.round((rec.end - rec.start) / 1000))}s`, color: REPORT_COLOR }
+  if (rec || p.isRunning) return { text: '● Working', color: 'success' }
+  return { text: '✓ Reported', color: REPORT_COLOR }
 }
 
 const names = (list: Service[]) => {
@@ -151,7 +178,8 @@ const routingText = (list: Member[], cfg: CrewConfig = DEFAULT_CONFIG) => {
     toolsRule(cfg),
     '7. Claude members: the Agent tool, always passing both `model` (the member\'s alias) and `effort` (the member\'s effort) explicitly, so nothing has to fill them in. Codex members: Bash, `codex exec --skip-git-repo-check -m <model> -c model_reasoning_effort=<effort> "<brief>"`, in a folder of its own when it writes files.',
     '8. Before each delegation, tell the user in one line which member gets it and at what effort.',
-    '9. If you are a delegated worker yourself, ignore these routing rules and do your brief.',
+    '9. Crew plan. Before the first delegation of a task that uses more than one member or more than one step, put a short "Crew plan" block in your reply: a markdown table with the columns Member, Effort and Does, one row per member you will use. Include yourself (the Boss) for the work you keep, with a few words on why you keep it. When the plan changes along the way, post an updated plan that says what changed. A single quick delegation needs only the one-line announcement. Each delegation also gets a card under its call in the transcript, drawn by the Crew mod, so do not repeat that card\'s details in prose.',
+    '10. If you are a delegated worker yourself, ignore these routing rules and do your brief.',
   ].join('\n\n')
 }
 
@@ -175,10 +203,17 @@ async function finish($: EngineInterface, id: string): Promise<void> {
 }
 
 
-/**
- * A Claude subagent call. One that runs in the foreground is done when the call returns;
- * one sent to the background is done only when its own turn ends, so it stays lit till then.
- */
+/** Marks a delegation's card done (or working again, for a follow-up). */
+async function markCall($: EngineInterface, useId: string | undefined, done: boolean): Promise<void> {
+  if (!useId) return
+  await update($, calls, c => {
+    const call = c[useId]
+    if (!call) return c
+    const { end: _, ...open } = call
+    return { ...c, [useId]: done ? { ...call, end: Date.now() } : open }
+  })
+}
+
 /** Prefix of a background shell task's key in `agents`, beside subagent ids. */
 const SHELL = 'shell:'
 
@@ -192,26 +227,43 @@ async function settleShells($: EngineInterface, inFlight: readonly { id: string 
   }
 }
 
-async function delegate<T>($: EngineInterface, id: string | undefined, run: () => Promise<T>): Promise<T> {
+/**
+ * A delegated call (a Claude subagent or a `codex exec`). One that runs in the foreground is done
+ * when the call returns; one sent to the background is done only when it ends, so it stays lit till then.
+ * `useId` and `task` feed the card drawn under the call in the transcript.
+ */
+async function delegate<T>(
+  $: EngineInterface,
+  id: string | undefined,
+  run: () => Promise<T>,
+  card?: { useId?: string; task: string },
+): Promise<T> {
   if (!id) return run()
+  const useId = card?.useId
+  if (useId) {
+    const from = (await read($, lead)) || 'opus'
+    await update($, calls, c => ({ ...c, [useId]: { member: id, task: card.task, from, start: Date.now() } }))
+  }
   await begin($, id)
   let out: T
   try {
     out = await run()
   } catch (err) {
     await finish($, id)
+    await markCall($, useId, true)
     throw err
   }
   const res = (out as { result?: { status?: string; agentId?: string; backgroundTaskId?: string } } | undefined)?.result
   if (res?.status === 'async_launched' && res.agentId) {
     const agentId = res.agentId
-    await update($, agents, a => ({ ...a, [agentId]: { member: id, running: true } }))
+    await update($, agents, a => ({ ...a, [agentId]: { member: id, running: true, useId } }))
   } else if (res?.backgroundTaskId) {
     // A background shell (a Codex member run with run_in_background): lit until the task leaves the session's list.
     const key = `${SHELL}${res.backgroundTaskId}`
-    await update($, agents, a => ({ ...a, [key]: { member: id, running: true } }))
+    await update($, agents, a => ({ ...a, [key]: { member: id, running: true, useId } }))
   } else {
     await finish($, id)
+    await markCall($, useId, true)
   }
   return out
 }
@@ -224,6 +276,7 @@ async function agentTurn($: EngineInterface, agentId: string | undefined, runnin
   await update($, agents, a => ({ ...a, [agentId]: { ...entry, running } }))
   if (running) await begin($, entry.member)
   else await finish($, entry.member)
+  await markCall($, entry.useId, !running)
 }
 
 /** Ends a report-back line, unless newer work has lit it again since. */
@@ -347,7 +400,7 @@ export const register: Register = on => {
     const list = await read($, members)
     const member = e.model ? memberForAlias(list, e.model) : undefined
     const call = member && !e.effort ? { ...e, effort: member.effort } : e
-    return delegate($, member?.id, () => next(call))
+    return delegate($, member?.id, () => next(call), { useId: useIdOf(e), task: e.description || brief(e.prompt) })
   }).catch(($, e, next) => next(e))
 
   // Codex workers: add the crew's effort when the command sets none, and light up the member.
@@ -359,7 +412,49 @@ export const register: Register = on => {
       member && !e.command.includes('model_reasoning_effort')
         ? e.command.replace(CODEX_EXEC, m => `${m} -c model_reasoning_effort=${member.effort}`)
         : e.command
-    return delegate($, member?.id, () => next({ ...e, command }))
+    return delegate($, member?.id, () => next({ ...e, command }), { useId: useIdOf(e), task: codexTask(e) })
+  }).catch(($, e, next) => next(e))
+
+  // A card under each delegation's row in the transcript: who got it, from whom, and how it went.
+  on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const row = await next(e)
+    const p = e.props as { tool_use_id: string; tool: string; input: unknown; isRunning: boolean; isErrored: boolean; isInterrupted: boolean }
+    const input = (p.input ?? {}) as { model?: string; description?: string; prompt?: string; command?: string }
+    const isAgent = p.tool === 'Agent'
+    const isCodex = p.tool === 'Bash' && typeof input.command === 'string' && CODEX_EXEC.test(input.command)
+    if (!isAgent && !isCodex) return row
+    const list = await read($, members)
+    const rec = (await read($, calls))[p.tool_use_id]
+    const member = rec
+      ? list.find(m => m.id === rec.member)
+      : isAgent
+        ? input.model ? memberForAlias(list, input.model) : undefined
+        : memberForCodex(list, input.command ?? '')
+    if (!member) return row
+    const from = list.find(m => m.id === (rec?.from || 'opus'))?.name ?? 'Opus'
+    const task = rec?.task ?? (isAgent ? input.description || brief(input.prompt) : codexTask(input))
+    const status = cardStatus(p, rec)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {row}
+        <Box flexDirection="column" borderStyle="round" borderColor={VENDOR_COLOR[member.vendor]} paddingX="sm" marginTop="xs">
+          <Box flexDirection="row" justifyContent="space-between" gap="sm">
+            <Text>
+              <Text bold color={VENDOR_COLOR[member.vendor]}>{`● ${member.name}`}</Text>
+              <Text dimColor>{` · ${VENDOR_LABEL[member.vendor]} · ${member.badge ?? TIERS[member.tier] ?? ''} · ${member.model} · effort `}</Text>
+              <Text color={EFFORT_COLOR[member.effort]}>{member.effort}</Text>
+            </Text>
+            <Text bold color={status.color}>{status.text}</Text>
+          </Box>
+          <Text>
+            <Text dimColor>Task: </Text>
+            <Text>{task}</Text>
+            <Text dimColor>{`   From: ${from}`}</Text>
+          </Text>
+        </Box>
+      </Box>
+    )
   }).catch(($, e, next) => next(e))
 
   // A turn ended: background Codex runs that finished since are reported back.

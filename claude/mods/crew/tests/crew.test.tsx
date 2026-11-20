@@ -210,6 +210,62 @@ test('a background Codex run stays lit until the session no longer lists it', as
   expect(after).not.toContain('class="route command"')
 })
 
+test('each delegation gets a card under its call: who, from whom, and its status', async ($, on) => {
+  on('tool.call', (_, e) =>
+    (e as { tool?: string }).tool === 'Bash'
+      ? ({ result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'shell-9' } }) as never
+      : ({ result: {} }) as never,
+  )
+  mock.store(on)
+  mock.clock(on)
+  on('classic.Stop', () => ({}) as never)
+  on('ui.render', { component: 'ToolUse' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>row</Text>
+  })
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const codex = { command: 'codex exec -m gpt-6.1-terra "count lines"', description: 'Count install.sh lines', run_in_background: true }
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-codex', ...codex } as never)
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'tu-agent', description: 'Summarize README', prompt: 'x', model: 'haiku', effort: 'xhigh' } as never)
+
+  const card = async (id: string, tool: string, input: unknown, surface: 'desktop' | 'terminal' | 'mobile' | 'vscode' = 'desktop') => {
+    const ui = await $.ui.mount({
+      plugin: 'crew',
+      component: 'ToolUse',
+      requestId: id,
+      surface,
+      props: { tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false },
+    } as never)
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => (t as { text?: string }).text ?? '').join(' | ')
+    await ui.unmount()
+    return texts
+  }
+
+  const working = await card('tu-codex', 'Bash', codex)
+  expect(working).toContain('row')
+  expect(working).toContain('Terra')
+  expect(working).toContain('Count install.sh lines')
+  expect(working).toContain('Working')
+  for (const surface of ['terminal', 'mobile', 'vscode'] as const) {
+    expect(await card('tu-codex', 'Bash', codex, surface)).toContain('Terra')
+  }
+
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] } as never)
+  expect(await card('tu-codex', 'Bash', codex)).toContain('Reported')
+
+  const agent = await card('tu-agent', 'Agent', { description: 'Summarize README', prompt: 'x', model: 'haiku' })
+  expect(agent).toContain('Haiku')
+  expect(agent).toContain('Reported')
+
+  // A plain Bash call keeps its row and gets no card.
+  const plain = await card('tu-ls', 'Bash', { command: 'ls -la' })
+  expect(plain).toBe('row')
+})
+
 test('only the services in crew.json are guarded, shown and named in the rules', async ($, on) => {
   let reached = false
   on('classic.PreToolUse', () => {

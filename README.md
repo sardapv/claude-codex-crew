@@ -28,6 +28,35 @@ Run a team of AI models from Claude Code. The team spans a Claude subscription a
 
 In the panel you can change each member's model, effort and tier. Your changes are saved across sessions. To restore the defaults, select **Reset crew to defaults**.
 
+## Who did what, in the transcript
+
+The panel shows the crew right now. The transcript keeps the record of who did what, in two kinds of blocks.
+
+**1. A Crew plan, before the work starts.** For any task that uses more than one member or more than one step, Claude posts a plan before the first delegation. If the plan changes along the way, Claude posts an updated one that says what changed. A single quick delegation gets a one-line announcement instead.
+
+> **Crew plan**
+>
+> | Member | Effort | Does |
+> | --- | --- | --- |
+> | Opus (Boss) | high | Designs the change and reviews everything; keeps the mod code because it depends on context already loaded |
+> | Sol (Codex) | high | Rewrites `install.sh` from a written brief, in its own folder |
+> | Sonnet (Claude) | high | Reviews Sol's script against the brief |
+> | Luna (Codex) | xhigh | Renames the files Opus listed |
+
+The plan comes from the routing rules in Claude's instructions, so it depends on Claude following them.
+
+**2. A card under every delegation.** The mod draws a card under each Agent call and each `codex exec` call. It shows the member, its vendor, tier, model and effort, the task, and who gave it. The status changes from **Working** to **Reported** with the time taken. A background run stays at Working until it ends.
+
+```text
+Bash(codex exec -m gpt-6.1-terra "Run: wc -l install.sh ...")
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ● Terra · Codex · Specialist · gpt-6.1-terra · effort medium   ✓ Reported · 24s │
+│ Task: Count install.sh lines   From: Opus                                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+The mod draws these cards from the actual calls, so they appear even when Claude forgets to announce a delegation.
+
 ## Requirements
 
 - macOS or Linux, with `bash`, `rsync` and `python3`.
@@ -105,7 +134,8 @@ The mod is plain TypeScript in `claude/mods/crew/hooks/`. After you install it, 
 | To change | Edit |
 | --- | --- |
 | Default members, models, efforts and tiers | `DEFAULTS` in `hooks/register.tsx` |
-| The routing rules that Claude gets | `routingText` and `toolsRule` in `hooks/register.tsx` |
+| The routing rules that Claude gets, including the Crew plan rule | `routingText` and `toolsRule` in `hooks/register.tsx` |
+| The card under each delegation | the `ToolUse` render hook in `hooks/register.tsx` |
 | What counts as a read or a write | `isRead` in `hooks/permissions.ts`, and `codex/crew-guard.py` for Codex |
 | The look of the chart | `hooks/chart.ts` |
 
