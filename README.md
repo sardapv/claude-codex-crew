@@ -3,7 +3,7 @@
 Run a team of AI models from Claude Code. The team spans a Claude subscription and a Codex (OpenAI) subscription. A live org chart beside the chat shows who gives work to whom and who reports back, while the work runs.
 
 <p align="center">
-  <img src="docs/crew-demo.gif" alt="The Crew panel: Opus hands work down to Sol, Terra and Luna along green command lines, and each reports back up along a blue line" width="400">
+  <img src="docs/crew-demo.gif" alt="The Crew panel: Opus asks Astra, its Co-boss, for a view, then hands work down to Sonnet, Sol and Luna along green command lines, and each reports back up along a blue line" width="400">
   <br>
   <sub>A sample run: green lines are commands, blue lines are report-backs. <a href="docs/crew-demo.mp4">Full-quality video (MP4)</a></sub>
 </p>
