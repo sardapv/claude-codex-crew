@@ -50,7 +50,7 @@ The plan comes from the routing rules in Claude's instructions, so it depends on
 ```text
 Bash(codex exec -m gpt-6.1-terra "Run: wc -l install.sh ...")
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ ● Terra · Codex · Specialist · gpt-6.1-terra · effort medium   ✓ Reported · 24s │
+│ ● Terra · Codex · Specialist · gpt-6.1-terra · effort medium   ✓ Reported · 11s │
 │ Task: Count install.sh lines   From: Opus                                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```

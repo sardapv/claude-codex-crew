@@ -223,6 +223,12 @@ test('each delegation gets a card under its call: who, from whom, and its status
     const { Text } = $.ui.resolve(e)
     return <Text>row</Text>
   })
+  on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>Ran 3 commands</Text>
+  })
+  mock.env(on, { HOME: '/home/test' })
+  on('fs.read', () => ({ value: '' }))
   on('command.register', () => ({ value: { command: 'crew' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -264,6 +270,26 @@ test('each delegation gets a card under its call: who, from whom, and its status
   // A plain Bash call keeps its row and gets no card.
   const plain = await card('tu-ls', 'Bash', { command: 'ls -la' })
   expect(plain).toBe('row')
+
+  // Folded into one "Ran 3 commands" line, the delegations still get their cards under it.
+  const call = (id: string, tool: string, input: unknown) => ({ tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false })
+  const group = async (isExpanded: boolean) => {
+    const ui = await $.ui.mount({
+      plugin: 'crew',
+      component: 'ToolGroup',
+      requestId: 'g-1',
+      surface: 'desktop',
+      props: { calls: [call('tu-codex', 'Bash', codex), call('tu-ls', 'Bash', { command: 'ls' }), call('tu-agent', 'Agent', { description: 'Summarize README', model: 'haiku' })], isActive: false, isExpanded },
+    } as never)
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => (t as { text?: string }).text ?? '').join(' | ')
+    await ui.unmount()
+    return texts
+  }
+  const folded = await group(false)
+  expect(folded).toContain('Ran 3 commands')
+  expect(folded).toContain('Terra')
+  expect(folded).toContain('Haiku')
+  expect(await group(true)).toBe('Ran 3 commands')
 })
 
 test('only the services in crew.json are guarded, shown and named in the rules', async ($, on) => {

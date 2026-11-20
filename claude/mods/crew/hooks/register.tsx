@@ -203,6 +203,46 @@ async function finish($: EngineInterface, id: string): Promise<void> {
 }
 
 
+/** A tool call as a `ToolUse` row or a `ToolGroup` entry describes it. */
+type CallView = { tool_use_id?: string; tool: string; input: unknown; isRunning: boolean; isErrored: boolean; isInterrupted: boolean }
+
+/** The card for one delegation (a Claude subagent or a `codex exec`), or undefined for any other call. */
+async function delegationCard($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0], p: CallView) {
+  const input = (p.input ?? {}) as { model?: string; description?: string; prompt?: string; command?: string }
+  const isAgent = p.tool === 'Agent'
+  const isCodex = p.tool === 'Bash' && typeof input.command === 'string' && CODEX_EXEC.test(input.command)
+  if (!isAgent && !isCodex) return undefined
+  const list = await read($, members)
+  const rec = p.tool_use_id ? (await read($, calls))[p.tool_use_id] : undefined
+  const member = rec
+    ? list.find(m => m.id === rec.member)
+    : isAgent
+      ? input.model ? memberForAlias(list, input.model) : undefined
+      : memberForCodex(list, input.command ?? '')
+  if (!member) return undefined
+  const from = list.find(m => m.id === (rec?.from || 'opus'))?.name ?? 'Opus'
+  const task = rec?.task ?? (isAgent ? input.description || brief(input.prompt) : codexTask(input))
+  const status = cardStatus(p, rec)
+  const { Box, Text } = $.ui.resolve(e)
+  return (
+    <Box key={p.tool_use_id ?? task} flexDirection="column" borderStyle="round" borderColor={VENDOR_COLOR[member.vendor]} paddingX="sm" marginTop="xs">
+      <Box flexDirection="row" justifyContent="space-between" gap="sm">
+        <Text>
+          <Text bold color={VENDOR_COLOR[member.vendor]}>{`● ${member.name}`}</Text>
+          <Text dimColor>{` · ${VENDOR_LABEL[member.vendor]} · ${member.badge ?? TIER_NAMES[member.tier] ?? ''} · ${member.model} · effort `}</Text>
+          <Text color={EFFORT_COLOR[member.effort]}>{member.effort}</Text>
+        </Text>
+        <Text bold color={status.color}>{status.text}</Text>
+      </Box>
+      <Text>
+        <Text dimColor>Task: </Text>
+        <Text>{task}</Text>
+        <Text dimColor>{`   From: ${from}`}</Text>
+      </Text>
+    </Box>
+  )
+}
+
 /** Marks a delegation's card done (or working again, for a follow-up). */
 async function markCall($: EngineInterface, useId: string | undefined, done: boolean): Promise<void> {
   if (!useId) return
@@ -418,41 +458,34 @@ export const register: Register = on => {
   // A card under each delegation's row in the transcript: who got it, from whom, and how it went.
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const row = await next(e)
-    const p = e.props as { tool_use_id: string; tool: string; input: unknown; isRunning: boolean; isErrored: boolean; isInterrupted: boolean }
-    const input = (p.input ?? {}) as { model?: string; description?: string; prompt?: string; command?: string }
-    const isAgent = p.tool === 'Agent'
-    const isCodex = p.tool === 'Bash' && typeof input.command === 'string' && CODEX_EXEC.test(input.command)
-    if (!isAgent && !isCodex) return row
-    const list = await read($, members)
-    const rec = (await read($, calls))[p.tool_use_id]
-    const member = rec
-      ? list.find(m => m.id === rec.member)
-      : isAgent
-        ? input.model ? memberForAlias(list, input.model) : undefined
-        : memberForCodex(list, input.command ?? '')
-    if (!member) return row
-    const from = list.find(m => m.id === (rec?.from || 'opus'))?.name ?? 'Opus'
-    const task = rec?.task ?? (isAgent ? input.description || brief(input.prompt) : codexTask(input))
-    const status = cardStatus(p, rec)
-    const { Box, Text } = $.ui.resolve(e)
+    const card = await delegationCard($, e, e.props as CallView)
+    if (!card) return row
+    const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
         {row}
-        <Box flexDirection="column" borderStyle="round" borderColor={VENDOR_COLOR[member.vendor]} paddingX="sm" marginTop="xs">
-          <Box flexDirection="row" justifyContent="space-between" gap="sm">
-            <Text>
-              <Text bold color={VENDOR_COLOR[member.vendor]}>{`● ${member.name}`}</Text>
-              <Text dimColor>{` · ${VENDOR_LABEL[member.vendor]} · ${member.badge ?? TIERS[member.tier] ?? ''} · ${member.model} · effort `}</Text>
-              <Text color={EFFORT_COLOR[member.effort]}>{member.effort}</Text>
-            </Text>
-            <Text bold color={status.color}>{status.text}</Text>
-          </Box>
-          <Text>
-            <Text dimColor>Task: </Text>
-            <Text>{task}</Text>
-            <Text dimColor>{`   From: ${from}`}</Text>
-          </Text>
-        </Box>
+        {card}
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
+
+  // The transcript folds runs of calls into one line ("Ran 6 commands"): the cards go under that line,
+  // so they show without unfolding it. Unfolded, each row draws its own card above instead.
+  on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    const line = await next(e)
+    const p = e.props as { calls: readonly CallView[]; isExpanded: boolean }
+    if (p.isExpanded) return line
+    const cards = []
+    for (const call of p.calls ?? []) {
+      const card = await delegationCard($, e, call)
+      if (card) cards.push(card)
+    }
+    if (cards.length === 0) return line
+    const { Box } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {line}
+        {cards}
       </Box>
     )
   }).catch(($, e, next) => next(e))
