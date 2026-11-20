@@ -75,6 +75,24 @@ const confirmReset = atom({ plugin: 'crew', key: 'confirmReset' } as const, fals
 const routes = atom({ plugin: 'crew', key: 'routes' } as const, {} as Record<string, Route>)
 const agents = atom({ plugin: 'crew', key: 'agents' } as const, {} as Record<string, { member: string; running: boolean; useId?: string }>)
 const calls = atom({ plugin: 'crew', key: 'calls' } as const, {} as Record<string, Call>)
+/** The effort the session itself runs at right now (its own picker), which the lead's card shows. */
+const leadEffort = atom({ plugin: 'crew', key: 'leadEffort' } as const, '' as Effort | '')
+
+/** Reads the turn's live effort from a main-thread hook event (a subagent's event is skipped). */
+async function noteLeadEffort($: EngineInterface, e: unknown): Promise<void> {
+  const ev = e as { agent_id?: string; effort?: { level?: string } }
+  const level = ev.effort?.level
+  if (ev.agent_id || !level || !(EFFORTS as string[]).includes(level)) return
+  if ((await read($, leadEffort)) !== level) await update($, leadEffort, () => level as Effort)
+}
+
+/** The crew as it runs now: the lead's card shows the session's live effort, not its saved one. */
+async function liveCrew($: EngineInterface): Promise<Member[]> {
+  const list = await read($, members)
+  const id = (await read($, lead)) || 'opus'
+  const live = await read($, leadEffort)
+  return live ? list.map(m => (m.id === id ? { ...m, effort: live } : m)) : list
+}
 
 /** How long a finished member's report-back line stays lit. */
 const REPORT_MS = 3500
@@ -226,7 +244,8 @@ async function delegationCard($: EngineInterface, e: Parameters<EngineInterface[
       ? input.model ? memberForAlias(list, input.model) : undefined
       : memberForCodex(list, input.command ?? '')
   if (!member) return undefined
-  const giver = list.find(m => m.id === (rec?.from || 'opus')) ?? list.find(m => m.id === 'opus') ?? member
+  const live = await liveCrew($)
+  const giver = live.find(m => m.id === (rec?.from || 'opus')) ?? live.find(m => m.id === 'opus') ?? member
   const task = rec?.task ?? (isAgent ? input.description || brief(input.prompt) : codexTask(input))
   const status = cardStatus(p, rec)
   const key = p.tool_use_id ?? task
@@ -450,6 +469,7 @@ export const register: Register = on => {
 
   // Shopify, PostHog, Supabase, Cloudflare: reads pass, writes ask the person, per the panel.
   on('classic.PreToolUse', async ($, e, next) => {
+    await noteLeadEffort($, e)
     const raw = e as unknown as { tool?: string; tool_name?: string; tool_input?: unknown; mcp_server?: { name?: string } }
     const verdict = classify(raw.tool_name ?? raw.tool ?? '', raw.tool_input ?? e, raw.mcp_server?.name)
     // A service this person did not choose is left to Claude Code's own permission rules.
@@ -517,6 +537,7 @@ export const register: Register = on => {
 
   // A turn ended: background Codex runs that finished since are reported back.
   on('classic.Stop', async ($, e, next) => {
+    await noteLeadEffort($, e)
     await settleShells($, (e as { background_tasks?: { id: string }[] }).background_tasks)
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -542,7 +563,9 @@ export const register: Register = on => {
     const setMember = (id: string, patch: Partial<Member>) =>
       save(l => l.map(m => (m.id === id ? { ...m, ...patch } : m)))
 
-    const sorted = [...list].sort((a, b) => a.tier - b.tier)
+    // The chart shows the crew as it runs now: the lead at the session's live effort.
+    const shown = await liveCrew($)
+    const sorted = [...shown].sort((a, b) => a.tier - b.tier)
 
     const alt = sorted.map(m => `${TIER_NAMES[m.tier] ?? ''} ${m.name}: ${m.model}, effort ${m.effort}`).join('; ')
     let chart
@@ -562,7 +585,7 @@ export const register: Register = on => {
       )
     } else {
       const { Svg } = $.ui.resolve(e)
-      const drawn = crewChart(list, busy, target?.id ?? '', await read($, routes))
+      const drawn = crewChart(shown, busy, target?.id ?? '', await read($, routes))
       chart = <Svg source={drawn.svg} alt={alt} width={drawn.width} height={drawn.height} />
     }
 

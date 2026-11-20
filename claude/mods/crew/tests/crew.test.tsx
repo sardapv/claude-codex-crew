@@ -299,6 +299,32 @@ test('each delegation gets a card under its call: who, from whom, and its status
   expect(await group(true)).toBe('Ran 3 commands')
 })
 
+test("the lead's card shows the session's live effort, not its saved one", async ($, on) => {
+  mock.store(on)
+  on('classic.Stop', () => ({}) as never)
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const opusCard = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const src = ((await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined)?.props?.source ?? ''
+    await ui.unmount()
+    // The Opus card's text runs from its name to the next card's title.
+    return src.slice(src.indexOf('>Opus<'), src.indexOf('>Astra<'))
+  }
+  expect(await opusCard()).toContain('>high<')
+
+  // The session runs at medium: a main-thread event says so; a subagent's does not count.
+  await $.classic.Stop({ stop_hook_active: false, agent_id: 'sub-1', effort: { level: 'low' } } as never)
+  expect(await opusCard()).toContain('>high<')
+  await $.classic.Stop({ stop_hook_active: false, effort: { level: 'medium' } } as never)
+  const now = await opusCard()
+  expect(now).toContain('>medium<')
+  expect(now).not.toContain('>high<')
+})
+
 test('only the services in crew.json are guarded, shown and named in the rules', async ($, on) => {
   let reached = false
   on('classic.PreToolUse', () => {

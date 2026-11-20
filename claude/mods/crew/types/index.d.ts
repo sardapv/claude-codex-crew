@@ -32,6 +32,8 @@ declare module 'claude-code' {
       routes: Record<string, Route>
       /** Background subagents by agent id: which member, and whether it is working now. */
       agents: Record<string, { member: string; running: boolean; useId?: string }>
+      /** The session's own live effort, read from its hook events; '' until one arrives. */
+      leadEffort: Effort | ''
       /** Delegations by tool_use_id, for the cards in the transcript. */
       calls: Record<string, Call>
       /** From ~/.claude/crew.json: the services this person uses, and whether Codex is set up. */
