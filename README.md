@@ -28,34 +28,9 @@ Run a team of AI models from Claude Code. The team spans a Claude subscription a
 
 In the panel you can change each member's model, effort and tier. Your changes are saved across sessions. To restore the defaults, select **Reset crew to defaults**.
 
-## Who did what, in the transcript
+## Who did what
 
-The panel shows the crew right now. The transcript keeps the record of who did what, in two kinds of blocks.
-
-**1. A Crew plan, before the work starts.** For any task that uses more than one member or more than one step, Claude posts a plan before the first delegation. If the plan changes along the way, Claude posts an updated one that says what changed. A single quick delegation gets a one-line announcement instead.
-
-> **Crew plan**
->
-> | Member | Effort | Does |
-> | --- | --- | --- |
-> | Opus (Boss) | high | Designs the change and reviews everything; keeps the mod code because it depends on context already loaded |
-> | Sol (Codex) | high | Rewrites `install.sh` from a written brief, in its own folder |
-> | Sonnet (Claude) | high | Reviews Sol's script against the brief |
-> | Luna (Codex) | xhigh | Renames the files Opus listed |
-
-The plan comes from the routing rules in Claude's instructions, so it depends on Claude following them.
-
-**2. A card under every delegation.** The mod draws a card under each Agent call and each `codex exec` call. It shows the member, its vendor, tier, model and effort, the task, and who gave it. The status changes from **Working** to **Reported** with the time taken. A background run stays at Working until it ends.
-
-```text
-Bash(codex exec -m gpt-6.1-terra "Run: wc -l install.sh ...")
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ ● Terra · Codex · Specialist · gpt-6.1-terra · effort medium   ✓ Reported · 11s │
-│ Task: Count install.sh lines   From: Opus                                    │
-╰──────────────────────────────────────────────────────────────────────────────╯
-```
-
-The mod draws these cards from the actual calls, so they appear even when Claude forgets to announce a delegation.
+Before multi-step work, Claude posts a Crew plan table. The mod also draws a card under every delegation that shows the member, the task and the status. [See examples](docs/transcript.md).
 
 ## Requirements
 
@@ -63,7 +38,19 @@ The mod draws these cards from the actual calls, so they appear even when Claude
 - [Claude Code](https://claude.com/claude-code), in a version that supports mods (plugins with a hooks module). The panel draws in the Claude desktop app and in other surfaces that support panes.
 - Optional: the [Codex CLI](https://github.com/openai/codex), signed in. Without Codex, the routing rules send Codex members' work to Claude members, and the chart still shows the whole crew.
 
-## Set up with Claude (recommended)
+## Cost
+
+The crew adds no cost of its own. It runs on the Claude and Codex subscriptions you already have, and each delegation uses that member's model and effort from that subscription's usage.
+
+Sending routine work to cheaper members (Haiku, Luna, Terra) is the point. It saves your Claude usage for work that needs it. Fable, the CTO, is the most expensive member. It runs only when Opus and Astra have both tried and failed, and Claude must say why before it calls Fable.
+
+To spend less on any member, lower its effort or pick a cheaper model in the panel.
+
+## Install
+
+Which setup should I use? Both routes run the same `install.sh` and end with the same result. The Claude route also finds your connector IDs and fills `~/.claude/crew.json` for you, so it is quicker. The by-hand route leaves you to add connector IDs yourself. Both routes still need the Codex steps by hand (`codex login`, and trusting **Crew guard** in `/hooks`), because those need your sign-in.
+
+### Set up with Claude (recommended)
 
 Paste this into Claude Code. Claude asks which services you use, runs the installer, and finds your connector IDs, so you don't look anything up by hand.
 
@@ -78,11 +65,11 @@ Set up Claude Codex Crew for me from https://github.com/sardapv/claude-codex-cre
 5. Show me the final ~/.claude/crew.json and the hand steps the installer printed that still apply to me. Tell me to open a new Claude Code session, where the Crew panel opens by itself.
 ```
 
-## Set up by hand
+### Set up by hand
 
 ```bash
-git clone https://github.com/sardapv/claude-codex-crew.git
-cd claude-codex-crew
+git clone https://github.com/sardapv/claude-codex-crew.git ~/claude-codex-crew
+cd ~/claude-codex-crew
 ./install.sh
 ```
 
@@ -103,10 +90,16 @@ You can run the installer again at any time to change your answers. It backs up 
 Then do the steps that the installer prints at the end:
 
 1. **Claude:** connect the services you chose (run `/mcp` to see them).
-2. **Connector IDs:** add them to `~/.claude/crew.json` (see the next section).
+2. **Connector IDs:** add them to `~/.claude/crew.json` (see the section "~/.claude/crew.json" below).
 3. **Codex:** run `codex login`, connect your services in Codex, and for Cloudflare run `codex mcp login cloudflare`.
 4. **Codex:** start `codex`, open `/hooks` and trust **Crew guard**. Until you trust it, Codex does not run the guard, so writes are not blocked.
 5. Open a new Claude Code session. The Crew panel opens by itself. If you close it, type `/crew`.
+
+## What you should see
+
+- Open a new Claude Code session. The Crew panel opens beside the chat with all members and an "Idle" badge. If it doesn't, type `/crew`.
+- Give Claude a multi-step task. It posts a "Crew plan" table before it delegates.
+- Each delegation gets a card in the transcript and a green line on the chart. When the member finishes, a blue report-back line runs back.
 
 ## ~/.claude/crew.json
 
@@ -125,7 +118,11 @@ This file holds your setup. It stays on your machine and is never part of the re
 
 - **`services`**: the services the panel shows and guards. A service that isn't listed gets Claude Code's normal permission prompts. Without this key, the mod uses all four.
 - **`codex`**: `false` tells Claude not to delegate to Codex members.
-- **`connectors`**: maps each claude.ai connector to its service. Claude names a connector's tools `mcp__<connector id>__<tool>`, and every account has its own IDs. To find an ID, look at the connector's tool names in `/mcp`, or let Claude do it with the prompt above. The official PostHog and Cloudflare plugins need no entry. Without an entry, the mod falls back to the server's name: a server whose name contains "supabase" counts as Supabase.
+- **`connectors`**: maps each claude.ai connector to its service. Claude names a connector's tools `mcp__<connector id>__<tool>`, and every account has its own IDs. The connector ID is the part between `mcp__` and the next `__`. For example, a tool named `mcp__0f1e2d3c-1111-2222-3333-444455556666__execute_sql` belongs to the connector with ID `0f1e2d3c-1111-2222-3333-444455556666`, and that one is Supabase. To find an ID, look at the connector's tool names in `/mcp`, or let Claude do it with the prompt above.
+
+  Without an entry, the mod first tries the server's name: a server whose name contains "supabase" counts as Supabase. If it still can't tell the service, that connector's calls get Claude Code's normal permission prompts. Nothing becomes less safe. You only lose "reads run without asking" for that connector.
+
+  The official PostHog and Cloudflare plugins (tools named `mcp__plugin_posthog_posthog__*` and `mcp__plugin_cloudflare_cloudflare__*`) need no entry.
 
 ## Make it yours
 
@@ -135,7 +132,7 @@ The mod is plain TypeScript in `claude/mods/crew/hooks/`. After you install it, 
 | --- | --- |
 | Default members, models, efforts and tiers | `DEFAULTS` in `hooks/register.tsx` |
 | The routing rules that Claude gets, including the Crew plan rule | `routingText` and `toolsRule` in `hooks/register.tsx` |
-| The card under each delegation | the `ToolUse` render hook in `hooks/register.tsx` |
+| The card under each delegation | `delegationCard` and the `ToolUse` and `ToolGroup` render hooks in `hooks/register.tsx` |
 | What counts as a read or a write | `isRead` in `hooks/permissions.ts`, and `codex/crew-guard.py` for Codex |
 | The look of the chart | `hooks/chart.ts` |
 
