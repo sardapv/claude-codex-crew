@@ -34,6 +34,10 @@ declare module 'claude-code' {
       agents: Record<string, { member: string; running: boolean; useId?: string }>
       /** The session's own live effort, read from its hook events; '' until one arrives. */
       leadEffort: Effort | ''
+      /** This chat's own member id: the Claude member whose model the chat runs. */
+      boss: string
+      /** True once this chat's crew or service access differs from the saved defaults. */
+      chatOnly: boolean
       /** Delegations by tool_use_id, for the cards in the transcript. */
       calls: Record<string, Call>
       /** From ~/.claude/crew.json: the services this person uses, and whether Codex is set up. */

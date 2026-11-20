@@ -86,10 +86,26 @@ async function noteLeadEffort($: EngineInterface, e: unknown): Promise<void> {
   if ((await read($, leadEffort)) !== level) await update($, leadEffort, () => level as Effort)
 }
 
-/** The crew as it runs now: the lead's card shows the session's live effort, not its saved one. */
+/** This chat's own member: the Claude member whose model the chat runs. Kept between turns. */
+const boss = atom({ plugin: 'crew', key: 'boss' } as const, '')
+/** True once this chat's crew or service access differs from the saved defaults. */
+const chatOnly = atom({ plugin: 'crew', key: 'chatOnly' } as const, false)
+
+const bossFor = (list: Member[], model: string) =>
+  list.find(m => m.vendor === 'claude' && model.includes(m.model.replace(/^claude-/, '')))
+
+/** Works out which member this chat is, from the model it runs now. */
+async function noteBoss($: EngineInterface): Promise<string> {
+  const model = await $.session.model().catch(() => '')
+  const id = bossFor(await read($, members), model)?.id ?? ''
+  if (id && (await read($, boss)) !== id) await update($, boss, () => id)
+  return id
+}
+
+/** The crew as it runs now: this chat's own member shows the chat's live effort, not its saved one. */
 async function liveCrew($: EngineInterface): Promise<Member[]> {
   const list = await read($, members)
-  const id = (await read($, lead)) || 'opus'
+  const id = (await read($, boss)) || 'opus'
   const live = await read($, leadEffort)
   return live ? list.map(m => (m.id === id ? { ...m, effort: live } : m)) : list
 }
@@ -210,7 +226,7 @@ const routingText = (list: Member[], cfg: CrewConfig = DEFAULT_CONFIG) => {
 /** A member starts work: it lights up, with a command line from whoever leads this turn. */
 async function begin($: EngineInterface, id: string): Promise<void> {
   // The commander is whoever leads this turn (the session's own model), else the Boss.
-  const from = (await read($, lead)) || 'opus'
+  const from = (await read($, lead)) || (await read($, boss)) || 'opus'
   await update($, active, a => ({ ...a, [id]: (a[id] ?? 0) + 1 }))
   await update($, routes, r => ({ ...r, [id]: { from, phase: 'command' as const, at: Date.now() } }))
 }
@@ -325,7 +341,7 @@ async function delegate<T>(
   if (!id) return run()
   const useId = card?.useId
   if (useId) {
-    const from = (await read($, lead)) || 'opus'
+    const from = (await read($, lead)) || (await read($, boss)) || 'opus'
     await update($, calls, c => ({ ...c, [useId]: { member: id, task: card.task, from, start: Date.now() } }))
   }
   await begin($, id)
@@ -376,8 +392,10 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // This person's services, Codex setup and connector ids live outside the mod, in ~/.claude/crew.json.
     await loadConfig($)
+    // A chat with its own changes keeps them (a reload runs this again); any other loads the saved defaults.
+    const ownChanges = await read($, chatOnly)
     const saved = await $.store.get(STORE_KEY)
-    if (Array.isArray(saved) && saved.length > 0 && saved.every(isMember)) {
+    if (!ownChanges && Array.isArray(saved) && saved.length > 0 && saved.every(isMember)) {
       await update($, members, () => saved as Member[])
     }
     // One-time move of juniors to xhigh, keeping every other edit.
@@ -406,13 +424,14 @@ export const register: Register = on => {
       await $.store.set('cto-astra', true)
     }
     const savedPerms = await $.store.get(PERMS_KEY)
-    if (savedPerms && typeof savedPerms === 'object') {
+    if (!ownChanges && savedPerms && typeof savedPerms === 'object') {
       await update($, perms, p => ({ ...p, ...(savedPerms as Partial<Record<Service, PermMode>>) }))
     }
     await update($, active, () => ({}))
     await update($, routes, () => ({}))
     await update($, agents, () => ({}))
     await update($, lead, () => '')
+    await noteBoss($)
     await $.command.register({ name: 'crew', description: 'Show and edit your AI crew' })
     void $.ui.open({ id: PANE, title: 'Crew' })
 
@@ -439,10 +458,8 @@ export const register: Register = on => {
   // The boss is the session itself: lit while its own turn runs.
   on('turn.start', async ($, e, next) => {
     if (!e.agentId) {
-      const model = await $.session.model()
-      const list = await read($, members)
-      const boss = list.find(m => m.vendor === 'claude' && model.includes(m.model.replace(/^claude-/, '')))
-      await update($, lead, () => boss?.id ?? '')
+      const id = await noteBoss($)
+      await update($, lead, () => id)
     } else await agentTurn($, e.agentId, true)
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -551,15 +568,31 @@ export const register: Register = on => {
     const access = await read($, perms)
     const busy = leadId ? { ...counts, [leadId]: (counts[leadId] ?? 0) + 1 } : counts
     const target = list.find(m => m.id === chosen) ?? list[0]
+    // Edits apply to this chat only, until "Save as default" writes them for every new chat.
     const setPerm = async (s: Service, mode: PermMode) => {
       await update($, perms, p => ({ ...p, [s]: mode }))
-      await $.store.set(PERMS_KEY, await read($, perms))
+      await update($, chatOnly, () => true)
     }
 
     const save = async (fn: (l: Member[]) => Member[]) => {
       await update($, members, fn)
-      await $.store.set(STORE_KEY, await read($, members))
+      await update($, chatOnly, () => true)
     }
+    const saveDefaults = async () => {
+      await $.store.set(STORE_KEY, await read($, members))
+      await $.store.set(PERMS_KEY, await read($, perms))
+      await update($, chatOnly, () => false)
+    }
+    const useDefaults = async () => {
+      const saved = await $.store.get(STORE_KEY)
+      await update($, members, () => (Array.isArray(saved) && saved.length > 0 && saved.every(isMember) ? (saved as Member[]) : DEFAULTS))
+      const savedPerms = await $.store.get(PERMS_KEY)
+      await update($, perms, () => ({ ...DEFAULT_PERMS, ...(savedPerms && typeof savedPerms === 'object' ? (savedPerms as Partial<Record<Service, PermMode>>) : {}) }))
+      await update($, chatOnly, () => false)
+    }
+    const own = await read($, chatOnly)
+    const bossId = (await read($, boss)) || 'opus'
+    const liveEffort = await read($, leadEffort)
     const setMember = (id: string, patch: Partial<Member>) =>
       save(l => l.map(m => (m.id === id ? { ...m, ...patch } : m)))
 
@@ -611,8 +644,8 @@ export const register: Register = on => {
     const editor = target && card(
       'edit',
       'Edit a member',
-      'Pick someone, then tune them. Changes save instantly and apply to the next delegation.',
-      { text: '✓ Saved', color: 'success' },
+      'Pick someone, then tune them. Changes apply to this chat right away. Save them as the default to use them in every new chat.',
+      own ? { text: 'This chat only', color: 'warning' } : { text: '✓ Same as defaults', color: 'success' },
       <Box flexDirection="column" gap="sm">
         <Box flexDirection="row" flexWrap="wrap" gap="xs">
           {sorted.map(m => (
@@ -631,6 +664,11 @@ export const register: Register = on => {
             {(busy[target.id] ?? 0) > 0 && <Text color="success">{'  ● working'}</Text>}
           </Text>
           <Text size="footnote" dimColor>{target.role}</Text>
+          {target.id === bossId && (
+            <Text size="footnote" color="warning">
+              {`${target.name} is this chat itself. Its effort comes from the chat's own effort setting${liveEffort ? ` (${liveEffort} now)` : ''}; the value below applies only when another member hands work to ${target.name}.`}
+            </Text>
+          )}
         </Box>
         <Select
           key={`effort-${target.id}`}
@@ -655,7 +693,7 @@ export const register: Register = on => {
         />
         {confirming ? (
           <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="sm">
-            <Text size="footnote" color="warning">Reset all {list.length} members to the defaults?</Text>
+            <Text size="footnote" color="warning">Reset all {list.length} members to the factory settings, in this chat?</Text>
             <Box flexDirection="row" gap="xs">
               <Button key="reset-cancel" variant="secondary" label="Cancel" onPress={() => update($, confirmReset, () => false)} />
               <Button
@@ -670,8 +708,16 @@ export const register: Register = on => {
             </Box>
           </Box>
         ) : (
-          <Box flexDirection="row" justifyContent="flex-end">
-            <Button key="reset" plain dimColor label="Reset crew to defaults" onPress={() => update($, confirmReset, () => true)} />
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap="xs" flexWrap="wrap">
+            {own ? (
+              <Box flexDirection="row" gap="xs">
+                <Button key="save-default" variant="secondary" label="Save as default" onPress={saveDefaults} />
+                <Button key="use-default" plain dimColor label="Discard this chat's changes" onPress={useDefaults} />
+              </Box>
+            ) : (
+              <Box />
+            )}
+            <Button key="reset" plain dimColor label="Reset crew to factory settings" onPress={() => update($, confirmReset, () => true)} />
           </Box>
         )}
       </Box>,

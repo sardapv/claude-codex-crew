@@ -325,6 +325,52 @@ test("the lead's card shows the session's live effort, not its saved one", async
   expect(now).not.toContain('>high<')
 })
 
+test('a Sonnet chat: its live effort goes on Sonnet, and edits stay in this chat until saved', async ($, on) => {
+  const store: Record<string, unknown> = {}
+  on('store.get', (_, e) => ({ value: store[(e as { key: string }).key] }) as never)
+  on('store.set', (_, e) => {
+    const { key, value } = e as { key: string; value: unknown }
+    store[key] = value
+    return { value: {} } as never
+  })
+  on('session.model', () => ({ value: 'claude-sonnet-5-5' }) as never)
+  mock.env(on, { HOME: '/home/test' })
+  on('fs.read', () => ({ value: '' }))
+  on('classic.Stop', () => ({}) as never)
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const savedBefore = JSON.stringify(store['members-v1'])
+
+  const source = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const src = ((await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined)?.props?.source ?? ''
+    await ui.unmount()
+    return src
+  }
+  const between = (src: string, a: string, b: string) => src.slice(src.indexOf(`>${a}<`), src.indexOf(`>${b}<`))
+
+  await $.classic.Stop({ stop_hook_active: false, effort: { level: 'medium' } } as never)
+  const src = await source()
+  expect(between(src, 'Sonnet', 'Sol')).toContain('>medium<')
+  expect(between(src, 'Opus', 'Astra')).toContain('>high<')
+
+  // Pick Terra and set it to low: this chat changes, the saved defaults do not.
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'pick-terra' })
+  await ui.select({ key: 'effort-terra', value: 'low' })
+  expect(await ui.find({ type: 'Text', text: /This chat only/ })).toBeTruthy()
+  expect(JSON.stringify(store['members-v1'])).toBe(savedBefore)
+
+  // Save as default: now the store has it.
+  await ui.press({ key: 'save-default' })
+  const saved = store['members-v1'] as { id: string; effort: string }[]
+  expect(saved.find(m => m.id === 'terra')?.effort).toBe('low')
+  expect(await ui.find({ type: 'Text', text: /Same as defaults/ })).toBeTruthy()
+  await ui.unmount()
+})
+
 test('only the services in crew.json are guarded, shown and named in the rules', async ($, on) => {
   let reached = false
   on('classic.PreToolUse', () => {

@@ -26,7 +26,10 @@ Run a team of AI models from Claude Code. The team spans a Claude subscription a
 | 4 Junior | Luna | Codex | gpt-6-luna | xhigh | Chores that need no decisions |
 | 4 Junior | Haiku | Claude | claude-haiku-5-5 | xhigh | Chores that need no decisions |
 
-In the panel you can change each member's model, effort and tier. Your changes are saved across sessions. To restore the defaults, select **Reset crew to defaults**.
+In the panel you can change each member's model, effort and tier, and each service's access:
+
+- **Your changes apply to that chat only.** Each chat's panel shows its own work, and the chat's own member (Opus or Sonnet, whichever model the chat runs) shows the effort you picked for the chat.
+- **To use your changes in every new chat,** select **Save as default**. **Discard this chat's changes** goes back to your saved defaults, and **Reset crew to factory settings** goes back to the table above.
 
 ## Who did what
 
