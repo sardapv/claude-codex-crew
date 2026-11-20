@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Call, Effort, Member, PermMode, Route, Service, Vendor } from '../types'
 
-import { crewChart, EFFORTS, meter, TIER_NAMES } from './chart'
+import { crewChart, EFFORTS, type Handoff, handoffCard, meter, TIER_NAMES } from './chart'
 import {
   classify,
   CODEX_GUARDED,
@@ -128,12 +128,18 @@ const useIdOf = (e: unknown) => (e as { tool_use_id?: string }).tool_use_id || u
 const REPORT_COLOR = '#5AA9F0'
 
 /** The card's status: from the crew's own record when there is one, else from the row. */
-const cardStatus = (p: { isRunning: boolean; isErrored: boolean; isInterrupted: boolean }, rec: Call | undefined) => {
-  if (p.isInterrupted) return { text: 'Interrupted', color: 'warning' }
-  if (p.isErrored) return { text: 'Failed', color: 'error' }
-  if (rec?.end) return { text: `✓ Reported · ${Math.max(1, Math.round((rec.end - rec.start) / 1000))}s`, color: REPORT_COLOR }
-  if (rec || p.isRunning) return { text: '● Working', color: 'success' }
-  return { text: '✓ Reported', color: REPORT_COLOR }
+const cardStatus = (
+  p: { isRunning: boolean; isErrored: boolean; isInterrupted: boolean },
+  rec: Call | undefined,
+): { phase: Handoff['phase']; secs?: number; text: string; color: string } => {
+  if (p.isInterrupted) return { phase: 'interrupted', text: 'Interrupted', color: 'warning' }
+  if (p.isErrored) return { phase: 'failed', text: 'Failed', color: 'error' }
+  if (rec?.end) {
+    const secs = Math.max(1, Math.round((rec.end - rec.start) / 1000))
+    return { phase: 'reported', secs, text: `✓ Reported · ${secs}s`, color: REPORT_COLOR }
+  }
+  if (rec || p.isRunning) return { phase: 'working', text: '● Working', color: 'success' }
+  return { phase: 'reported', text: '✓ Reported', color: REPORT_COLOR }
 }
 
 const names = (list: Service[]) => {
@@ -220,24 +226,43 @@ async function delegationCard($: EngineInterface, e: Parameters<EngineInterface[
       ? input.model ? memberForAlias(list, input.model) : undefined
       : memberForCodex(list, input.command ?? '')
   if (!member) return undefined
-  const from = list.find(m => m.id === (rec?.from || 'opus'))?.name ?? 'Opus'
+  const giver = list.find(m => m.id === (rec?.from || 'opus')) ?? list.find(m => m.id === 'opus') ?? member
   const task = rec?.task ?? (isAgent ? input.description || brief(input.prompt) : codexTask(input))
   const status = cardStatus(p, rec)
+  const key = p.tool_use_id ?? task
+  const tier = (m: Member) => m.badge ?? TIER_NAMES[m.tier] ?? ''
+
+  // Desktop, VS Code, mobile: two boxes with a green arrow out and, once done, a blue arrow back.
+  if (e.surface !== 'terminal') {
+    const { Box, Svg } = $.ui.resolve(e)
+    const drawn = handoffCard(giver, member, task, { phase: status.phase, secs: status.secs })
+    const alt = `${giver.name} gave ${member.name} (${tier(member)}, ${member.model}, effort ${member.effort}) the task "${task}": ${status.text}`
+    // Room above and below, so cards never touch each other or the text that follows.
+    return (
+      <Box key={key} flexDirection="column" marginTop="sm" marginBottom="md">
+        <Svg source={drawn.svg} alt={alt} width={drawn.width} height={drawn.height} />
+      </Box>
+    )
+  }
+
+  // Terminal: the same handoff in text.
   const { Box, Text } = $.ui.resolve(e)
   return (
-    <Box key={p.tool_use_id ?? task} flexDirection="column" borderStyle="round" borderColor={VENDOR_COLOR[member.vendor]} paddingX="sm" marginTop="xs">
-      <Box flexDirection="row" justifyContent="space-between" gap="sm">
-        <Text>
-          <Text bold color={VENDOR_COLOR[member.vendor]}>{`● ${member.name}`}</Text>
-          <Text dimColor>{` · ${VENDOR_LABEL[member.vendor]} · ${member.badge ?? TIER_NAMES[member.tier] ?? ''} · ${member.model} · effort `}</Text>
-          <Text color={EFFORT_COLOR[member.effort]}>{member.effort}</Text>
-        </Text>
-        <Text bold color={status.color}>{status.text}</Text>
-      </Box>
+    <Box key={key} flexDirection="column" borderStyle="round" borderColor={VENDOR_COLOR[member.vendor]} paddingX="sm" marginTop="xs" marginBottom="sm">
+      <Text>
+        <Text bold color={VENDOR_COLOR[giver.vendor]}>{`[ ${giver.name} ]`}</Text>
+        <Text color="success">{' ── assigned ──▶ '}</Text>
+        <Text bold color={VENDOR_COLOR[member.vendor]}>{`[ ${member.name} · ${tier(member)} · ${member.model} · `}</Text>
+        <Text color={EFFORT_COLOR[member.effort]}>{member.effort}</Text>
+        <Text bold color={VENDOR_COLOR[member.vendor]}>{' ]'}</Text>
+      </Text>
+      <Text>
+        <Text dimColor>{`${' '.repeat(giver.name.length + 4)} `}</Text>
+        <Text color={status.color}>{status.phase === 'working' ? `   ${status.text}` : `◀── ${status.text} ──`}</Text>
+      </Text>
       <Text>
         <Text dimColor>Task: </Text>
         <Text>{task}</Text>
-        <Text dimColor>{`   From: ${from}`}</Text>
       </Text>
     </Box>
   )

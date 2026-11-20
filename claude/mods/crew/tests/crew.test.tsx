@@ -246,9 +246,10 @@ test('each delegation gets a card under its call: who, from whom, and its status
       surface,
       props: { tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false },
     } as never)
-    const texts = (await ui.findAll({ type: 'Text' })).map(t => (t as { text?: string }).text ?? '').join(' | ')
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => (t as { text?: string }).text ?? '')
+    const svgs = (await ui.findAll({ type: 'Svg' })).map(s => (s as { props?: { source?: string } }).props?.source ?? '')
     await ui.unmount()
-    return texts
+    return [...texts, ...svgs].join(' | ')
   }
 
   const working = await card('tu-codex', 'Bash', codex)
@@ -256,9 +257,14 @@ test('each delegation gets a card under its call: who, from whom, and its status
   expect(working).toContain('Terra')
   expect(working).toContain('Count install.sh lines')
   expect(working).toContain('Working')
+  // Two boxes: Opus gave it, Terra got it; a moving dot on the arrow while it works.
+  expect(working).toContain('>Opus<')
+  expect(working).toContain('>Terra<')
+  expect(working).toContain('animateMotion')
   for (const surface of ['terminal', 'mobile', 'vscode'] as const) {
     expect(await card('tu-codex', 'Bash', codex, surface)).toContain('Terra')
   }
+  expect(await card('tu-codex', 'Bash', codex, 'terminal')).toContain('assigned')
 
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [] } as never)
   expect(await card('tu-codex', 'Bash', codex)).toContain('Reported')
@@ -281,9 +287,10 @@ test('each delegation gets a card under its call: who, from whom, and its status
       surface: 'desktop',
       props: { calls: [call('tu-codex', 'Bash', codex), call('tu-ls', 'Bash', { command: 'ls' }), call('tu-agent', 'Agent', { description: 'Summarize README', model: 'haiku' })], isActive: false, isExpanded },
     } as never)
-    const texts = (await ui.findAll({ type: 'Text' })).map(t => (t as { text?: string }).text ?? '').join(' | ')
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => (t as { text?: string }).text ?? '')
+    const svgs = (await ui.findAll({ type: 'Svg' })).map(s => (s as { props?: { source?: string } }).props?.source ?? '')
     await ui.unmount()
-    return texts
+    return [...texts, ...svgs].join(' | ')
   }
   const folded = await group(false)
   expect(folded).toContain('Ran 3 commands')

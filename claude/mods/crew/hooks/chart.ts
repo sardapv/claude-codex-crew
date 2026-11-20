@@ -349,6 +349,100 @@ export function crewChart(
   return { svg, width: W, height }
 }
 
+export type Handoff = { phase: 'working' | 'reported' | 'failed' | 'interrupted'; secs?: number }
+
+/**
+ * The transcript card for one delegation: the member who gave the task on the left, the member
+ * who got it on the right, a green arrow for the command and, once done, a blue arrow back.
+ */
+export function handoffCard(from: Member, to: Member, task: string, state: Handoff) {
+  const CW = 600
+  const H = 116
+  const NW = 182
+  const NY = 14
+  const NH = 64
+  const lx = 14
+  const rx = CW - 14 - NW
+  const a1 = lx + NW + 10
+  const a2 = rx - 10
+  const cx = (a1 + a2) / 2
+  const done = state.phase === 'reported'
+  const bad = state.phase === 'failed' || state.phase === 'interrupted'
+  const back = done ? REPORT : bad ? '#E24B4A' : undefined
+  const label = done
+    ? `Reported${state.secs ? ` · ${state.secs}s` : ''}`
+    : state.phase === 'failed' ? 'Failed' : state.phase === 'interrupted' ? 'Interrupted' : 'Working'
+
+  const box = (m: Member, x: number, active: boolean) => {
+    const v = VENDOR[m.vendor]
+    const tier = m.badge ?? TIER_NAMES[m.tier] ?? `Tier ${m.tier}`
+    return `<g>
+      <title>${esc(`${m.name} · ${v.label} · ${tier} · ${m.model} · effort ${m.effort}`)}</title>
+      <rect x="${x}" y="${NY}" width="${NW}" height="${NH}" rx="12" class="box"/>
+      <rect x="${x}" y="${NY}" width="${NW}" height="${NH}" rx="12" fill="none" stroke="${v.color}" stroke-opacity="${active ? 0.9 : 0.35}" stroke-width="${active ? 1.5 : 1}"/>
+      <circle cx="${x + 26}" cy="${NY + 32}" r="14" fill="${v.color}" fill-opacity="0.16"/>
+      <circle cx="${x + 26}" cy="${NY + 32}" r="14" fill="none" stroke="${v.color}" stroke-opacity="0.45"/>
+      <text x="${x + 26}" y="${NY + 37}" text-anchor="middle" class="initial" style="fill:${v.color}">${esc(m.name.slice(0, 1))}</text>
+      <text x="${x + 48}" y="${NY + 24}" class="name">${esc(fit(m.name, NW - 56 - 52, 8))}</text>
+      <text x="${x + NW - 12}" y="${NY + 24}" text-anchor="end" class="tag" style="fill:${EFFORT_COLOR[m.effort]}">${m.effort}</text>
+      <text x="${x + 48}" y="${NY + 39}" class="meta">${esc(fit(`${tier} · ${v.label}`, NW - 60, 5.8))}</text>
+      <text x="${x + 48}" y="${NY + 53}" class="model">${esc(fit(m.model, NW - 60, 6.3))}</text>
+    </g>`
+  }
+
+  const out = `M${a1},38 L${a2},38`
+  const command = `<g>
+    <line x1="${a1}" y1="38" x2="${a2 - 2}" y2="38" stroke="${LIVE}" stroke-width="2" stroke-linecap="round"/>
+    <path d="M${a2 - 8},33 L${a2},38 L${a2 - 8},43" fill="none" stroke="${LIVE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="${cx}" y="29" text-anchor="middle" class="tag" style="fill:${LIVE}">Assigned</text>
+    ${state.phase === 'working'
+      ? `<circle r="3.5" fill="${LIVE}" class="dot"><animateMotion dur="1.4s" repeatCount="indefinite" path="${out}"/></circle>`
+      : ''}
+  </g>`
+  const report = back
+    ? `<g>
+        <line x1="${a2}" y1="58" x2="${a1 + 2}" y2="58" stroke="${back}" stroke-width="2" stroke-linecap="round"/>
+        <path d="M${a1 + 8},53 L${a1},58 L${a1 + 8},63" fill="none" stroke="${back}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="${cx}" y="76" text-anchor="middle" class="tag" style="fill:${back}">${esc(label)}</text>
+      </g>`
+    : `<g>
+        <line x1="${a2}" y1="58" x2="${a1}" y2="58" class="pending"/>
+        <text x="${cx}" y="76" text-anchor="middle" class="tag" style="fill:${LIVE}">${label}</text>
+      </g>`
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${CW}" height="${H}" viewBox="0 0 ${CW} ${H}" role="img">
+  <style>
+    text { font-family: ${FONT}; }
+    .card { fill: #FFFFFF; stroke: #E6E3DA; stroke-width: 1; }
+    .box { fill: #FAF9F5; }
+    .name { font-size: 13.5px; font-weight: 650; fill: #1F1E1D; }
+    .initial { font-size: 13px; font-weight: 700; }
+    .meta { font-size: 10.5px; fill: #8A8880; }
+    .model { font-family: ${MONO}; font-size: 10px; fill: #8A8880; }
+    .tag { font-size: 11px; font-weight: 650; }
+    .label { font-size: 11px; fill: #8A8880; }
+    .task { font-size: 12.5px; fill: #1F1E1D; }
+    .pending { stroke: #DEDBD1; stroke-width: 1.5; stroke-dasharray: 3 5; }
+    @media (prefers-color-scheme: dark) {
+      .card { fill: #262624; stroke: #3A3936; }
+      .box { fill: #2E2D2B; }
+      .name, .task { fill: #F3F2EE; }
+      .meta, .model, .label { fill: #A9A79F; }
+      .pending { stroke: #4A4945; }
+    }
+    @media (prefers-reduced-motion: reduce) { .dot { display: none; } }
+  </style>
+  <rect x="0.5" y="0.5" width="${CW - 1}" height="${H - 1}" rx="14" class="card"/>
+  ${box(from, lx, false)}
+  ${box(to, rx, true)}
+  ${command}
+  ${report}
+  <text x="${lx}" y="${H - 16}" class="label">Task</text>
+  <text x="${lx + 36}" y="${H - 16}" class="task">${esc(fit(task, CW - lx * 2 - 36, 6.6))}</text>
+</svg>`
+  return { svg, width: CW, height: H }
+}
+
 /** One line per member, for the terminal. */
 export const meter = (effort: Effort) => {
   const n = EFFORTS.indexOf(effort) + 1
