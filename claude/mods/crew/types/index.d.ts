@@ -29,6 +29,8 @@ declare module 'claude-code' {
       routes: Record<string, Route>
       /** Background subagents by agent id: which member, and whether it is working now. */
       agents: Record<string, { member: string; running: boolean }>
+      /** From ~/.claude/crew.json: the services this person uses, and whether Codex is set up. */
+      config: { services: Service[]; codex: boolean }
     }
   }
 }

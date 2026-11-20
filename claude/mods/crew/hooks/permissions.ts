@@ -25,7 +25,22 @@ const PREFIXES: [RegExp, Service][] = [
   [/^mcp__plugin_cloudflare_cloudflare__/, 'cloudflare'],
 ]
 
-/** Connector ids private to this account, from ~/.claude/crew-connectors.json (never in the repo). */
+/** Services Codex may only read: Crew guard (codex/crew-guard.py) blocks their writes. */
+export const CODEX_GUARDED: Service[] = ['posthog', 'cloudflare']
+
+export type CrewConfig = { services: Service[]; codex: boolean }
+export const DEFAULT_CONFIG: CrewConfig = { services: [...SERVICES], codex: true }
+
+/** Reads ~/.claude/crew.json: `services` (missing means all four), `codex` (missing means true). */
+export function parseConfig(raw: unknown): CrewConfig {
+  const o = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+  const services = Array.isArray(o.services)
+    ? SERVICES.filter(s => (o.services as unknown[]).includes(s))
+    : [...SERVICES]
+  return { services, codex: o.codex !== false }
+}
+
+/** Connector ids private to this account, from ~/.claude/crew.json "connectors" (never in the repo). */
 let local: [string, Service][] = []
 
 /** Loads `{ "<connector id>": "<service>" }`; entries naming an unknown service are skipped. */

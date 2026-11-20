@@ -176,3 +176,86 @@ test('a background subagent stays lit until its own turn ends', async ($, on) =>
   expect(after).toContain('class="route report"')
   expect(after).not.toContain('class="route command"')
 })
+
+test('a background Codex run stays lit until the session no longer lists it', async ($, on) => {
+  on('tool.call', () => ({
+    result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'shell-1' },
+  }) as never)
+  mock.store(on)
+  mock.clock(on)
+  on('classic.Stop', () => ({}) as never)
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const chartSource = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const chart = (await ui.find({ type: 'Svg' })) as { props?: { source?: string } } | undefined
+    await ui.unmount()
+    return chart?.props?.source ?? ''
+  }
+  const stop = (ids: string[]) =>
+    $.classic.Stop({ stop_hook_active: false, background_tasks: ids.map(id => ({ id, type: 'shell', status: 'running', description: '' })) } as never)
+
+  await $.tool.call({ tool: 'Bash', command: 'codex exec -m gpt-6.1-sol "x"', run_in_background: true } as never)
+  expect(await chartSource()).toContain('class="route command"')
+
+  await stop(['shell-1'])
+  expect(await chartSource()).toContain('class="route command"')
+
+  await stop([])
+  const after = await chartSource()
+  expect(after).toContain('class="route report"')
+  expect(after).not.toContain('class="route command"')
+})
+
+test('only the services in crew.json are guarded, shown and named in the rules', async ($, on) => {
+  let reached = false
+  on('classic.PreToolUse', () => {
+    reached = true
+    return {} as never
+  })
+  on('tool.call', () => ({ result: { ok: true } }))
+  on('prompt.compose', () => ({ sections: [] }))
+  mock.env(on, { HOME: '/home/test' })
+  mock.store(on)
+  on('fs.read', (_, e) => ({
+    value: e.path.endsWith('/crew.json')
+      ? JSON.stringify({ services: ['supabase'], codex: false, connectors: { 'test-supabase-id': 'supabase', 'test-shop-id': 'shopify' } })
+      : '',
+  }))
+  on('command.register', () => ({ value: { command: 'crew' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const passes = async (tool: string, input: Record<string, unknown>) => {
+    reached = false
+    await $.tool.call({ tool, ...input } as never)
+    return reached
+  }
+  // Supabase is chosen: a write stops to ask. Shopify is not: the crew leaves it to Claude Code.
+  expect(await passes('mcp__test-supabase-id__execute_sql', { project_id: 'p', query: 'delete from t' })).toBe(false)
+  expect(await passes('mcp__test-supabase-id__execute_sql', { project_id: 'p', query: 'select 1' })).toBe(true)
+  expect(await passes('mcp__test-shop-id__update-product', { id: '1' })).toBe(true)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'perm-supabase' })).toBeTruthy()
+  expect(await ui.find({ key: 'perm-shopify' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /Codex: read-only/ })).toBeFalsy()
+  await ui.unmount()
+
+  const { sections } = await $.prompt.compose({
+    model: 'claude-opus-5-5',
+    promptModel: 'claude-opus-5-5',
+    surfaces: ['desktop'],
+    tools: [],
+    outputStyle: null,
+    traits: [],
+  } as never)
+  const rules = sections.find(s => s.id === 'crew:routing')?.text ?? ''
+  expect(rules).toContain('including Supabase.')
+  expect(rules).toContain('Codex is not set up')
+  expect(rules).not.toContain('Shopify')
+})

@@ -4,11 +4,36 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import type { Effort, Member, PermMode, Route, Service, Vendor } from '../types'
 
 import { crewChart, EFFORTS, meter, TIER_NAMES } from './chart'
-import { classify, DEFAULT_PERMS, PERM_LABEL, SERVICE_LABEL, SERVICES, setConnectors } from './permissions'
+import {
+  classify,
+  CODEX_GUARDED,
+  type CrewConfig,
+  DEFAULT_CONFIG,
+  DEFAULT_PERMS,
+  parseConfig,
+  PERM_LABEL,
+  SERVICE_LABEL,
+  setConnectors,
+} from './permissions'
 
 const PERMS_KEY = 'perms-v1'
 const lead = atom({ plugin: 'crew', key: 'lead' } as const, '')
 const perms = atom({ plugin: 'crew', key: 'perms' } as const, DEFAULT_PERMS)
+const config = atom({ plugin: 'crew', key: 'config' } as const, DEFAULT_CONFIG)
+
+/** Reads ~/.claude/crew.json (services, codex, connectors); the old crew-connectors.json still counts for ids. */
+async function loadConfig($: EngineInterface): Promise<void> {
+  const home = await $.env.get('HOME')
+  const json = async (path: string): Promise<unknown> => {
+    const text = await $.fs.read(path).catch(() => '')
+    try { return text ? JSON.parse(text) : undefined } catch { return undefined }
+  }
+  const crew = home ? await json(`${home}/.claude/crew.json`) : undefined
+  const legacy = home ? await json(`${home}/.claude/crew-connectors.json`) : undefined
+  const connectors = (crew as { connectors?: unknown } | undefined)?.connectors
+  setConnectors({ ...(typeof legacy === 'object' ? legacy : {}), ...(typeof connectors === 'object' ? connectors : {}) })
+  await update($, config, () => parseConfig(crew))
+}
 
 const PANE = 'crew'
 const STORE_KEY = 'members-v1'
@@ -84,7 +109,31 @@ const memberForCodex = (list: Member[], command: string) => {
     : codex.find(m => m.id === 'sol') ?? codex[0]
 }
 
-const routingText = (list: Member[]) => {
+const names = (list: Service[]) => {
+  const l = list.map(s => SERVICE_LABEL[s])
+  return l.length < 2 ? l.join('') : `${l.slice(0, -1).join(', ')} and ${l[l.length - 1]}`
+}
+
+/** Rule 6, written from the services and Codex setup in ~/.claude/crew.json. */
+const toolsRule = (cfg: CrewConfig) => {
+  if (cfg.services.length === 0) return '6. Tools. Claude members inherit this session\'s connections. No services are set up for the crew.'
+  const parts = [`6. Tools. Claude members inherit this session's connections, including ${names(cfg.services)}.`]
+  if (!cfg.codex) {
+    parts.push('Codex is not set up on this machine: do not delegate to Codex members; give their work to the Claude member of the same tier, or the next tier up.')
+    return parts.join(' ')
+  }
+  parts.push('Codex members reach them through their own Codex plugins and connectors.')
+  const guarded = cfg.services.filter(s => CODEX_GUARDED.includes(s))
+  if (guarded.length > 0) {
+    parts.push(`For Codex, ${names(guarded)} ${guarded.length > 1 ? 'are' : 'is'} read-only: a Codex hook, Crew guard, blocks every call there that may change data. Send ${names(guarded)} writes to a Claude member, where the user is asked.`)
+  }
+  if (guarded.includes('posthog')) {
+    parts.push('In a Codex brief for PostHog, spell the command as `call <tool> {json}` with a `context` argument, or the guard cannot tell it reads and blocks it.')
+  }
+  return parts.join(' ')
+}
+
+const routingText = (list: Member[], cfg: CrewConfig = DEFAULT_CONFIG) => {
   const sorted = [...list].sort((a, b) => a.tier - b.tier)
   const roster = sorted
     .map(m => `- Tier ${m.tier} ${m.badge ?? TIERS[m.tier] ?? ''}: ${m.name} (${VENDOR_LABEL[m.vendor]}, ${m.model}, effort ${m.effort}). ${m.role}.`)
@@ -99,7 +148,7 @@ const routingText = (list: Member[]) => {
     '3. Quality first. Junior output (tiers 3-4) never counts until a tier-2 or higher member has checked it. Risky, ambiguous or security-sensitive work never goes below tier 2. A failed task goes up a tier, never down.',
     '4. Juniors forget context: give them a short, complete brief with the goal, exact steps, files, what done looks like and what not to touch.',
     '5. Spread the load: send work Codex can do to Codex members, so Claude usage goes to work only Claude does well.',
-    '6. Tools. Claude members inherit this session\'s connections: Shopify, PostHog, Supabase and Cloudflare all tested working. Codex members reach Shopify and Supabase through their Codex plugins, and PostHog and Cloudflare read-only (all tested): a Codex hook, Crew guard, blocks every PostHog or Cloudflare call that may change data. Send PostHog and Cloudflare writes to a Claude member, where the user is asked. In a Codex brief for PostHog, spell the command as `call <tool> {json}` with a `context` argument, or the guard cannot tell it reads and blocks it.',
+    toolsRule(cfg),
     '7. Claude members: the Agent tool, always passing both `model` (the member\'s alias) and `effort` (the member\'s effort) explicitly, so nothing has to fill them in. Codex members: Bash, `codex exec --skip-git-repo-check -m <model> -c model_reasoning_effort=<effort> "<brief>"`, in a folder of its own when it writes files.',
     '8. Before each delegation, tell the user in one line which member gets it and at what effort.',
     '9. If you are a delegated worker yourself, ignore these routing rules and do your brief.',
@@ -125,21 +174,24 @@ async function finish($: EngineInterface, id: string): Promise<void> {
   })
 }
 
-// Lights a member up in the pane while its delegated call runs.
-async function track<T>($: EngineInterface, id: string | undefined, run: () => Promise<T>): Promise<T> {
-  if (!id) return run()
-  await begin($, id)
-  try {
-    return await run()
-  } finally {
-    await finish($, id)
-  }
-}
 
 /**
  * A Claude subagent call. One that runs in the foreground is done when the call returns;
  * one sent to the background is done only when its own turn ends, so it stays lit till then.
  */
+/** Prefix of a background shell task's key in `agents`, beside subagent ids. */
+const SHELL = 'shell:'
+
+/** Ends every background shell the session no longer lists as in flight. */
+async function settleShells($: EngineInterface, inFlight: readonly { id: string }[] | undefined): Promise<void> {
+  if (!inFlight) return
+  const live = new Set(inFlight.map(t => t.id))
+  const all = await read($, agents)
+  for (const [key, entry] of Object.entries(all)) {
+    if (key.startsWith(SHELL) && entry.running && !live.has(key.slice(SHELL.length))) await agentTurn($, key, false)
+  }
+}
+
 async function delegate<T>($: EngineInterface, id: string | undefined, run: () => Promise<T>): Promise<T> {
   if (!id) return run()
   await begin($, id)
@@ -150,10 +202,14 @@ async function delegate<T>($: EngineInterface, id: string | undefined, run: () =
     await finish($, id)
     throw err
   }
-  const res = (out as { result?: { status?: string; agentId?: string } } | undefined)?.result
+  const res = (out as { result?: { status?: string; agentId?: string; backgroundTaskId?: string } } | undefined)?.result
   if (res?.status === 'async_launched' && res.agentId) {
     const agentId = res.agentId
     await update($, agents, a => ({ ...a, [agentId]: { member: id, running: true } }))
+  } else if (res?.backgroundTaskId) {
+    // A background shell (a Codex member run with run_in_background): lit until the task leaves the session's list.
+    const key = `${SHELL}${res.backgroundTaskId}`
+    await update($, agents, a => ({ ...a, [key]: { member: id, running: true } }))
   } else {
     await finish($, id)
   }
@@ -181,12 +237,8 @@ async function clearReport($: EngineInterface, id: string, at: number): Promise<
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    // This account's connector ids live outside the mod, in ~/.claude/crew-connectors.json.
-    const home = await $.env.get('HOME')
-    if (home) {
-      const text = await $.fs.read(`${home}/.claude/crew-connectors.json`).catch(() => '')
-      try { setConnectors(text ? JSON.parse(text) : {}) } catch { setConnectors({}) }
-    }
+    // This person's services, Codex setup and connector ids live outside the mod, in ~/.claude/crew.json.
+    await loadConfig($)
     const saved = await $.store.get(STORE_KEY)
     if (Array.isArray(saved) && saved.length > 0 && saved.every(isMember)) {
       await update($, members, () => saved as Member[])
@@ -242,7 +294,7 @@ export const register: Register = on => {
     return {
       sections: [
         ...composed.sections,
-        { id: 'crew:routing', text: routingText(list), scope: 'session' as const },
+        { id: 'crew:routing', text: routingText(list, await read($, config)), scope: 'session' as const },
       ],
     }
   })
@@ -282,7 +334,8 @@ export const register: Register = on => {
   on('classic.PreToolUse', async ($, e, next) => {
     const raw = e as unknown as { tool?: string; tool_name?: string; tool_input?: unknown; mcp_server?: { name?: string } }
     const verdict = classify(raw.tool_name ?? raw.tool ?? '', raw.tool_input ?? e, raw.mcp_server?.name)
-    if (!verdict) return next(e)
+    // A service this person did not choose is left to Claude Code's own permission rules.
+    if (!verdict || !(await read($, config)).services.includes(verdict.service)) return next(e)
     const mode = (await read($, perms))[verdict.service] ?? 'reads'
     if (mode === 'all' || (mode === 'reads' && verdict.isRead)) return next(e)
     const what = verdict.isRead ? 'call' : 'change'
@@ -306,7 +359,13 @@ export const register: Register = on => {
       member && !e.command.includes('model_reasoning_effort')
         ? e.command.replace(CODEX_EXEC, m => `${m} -c model_reasoning_effort=${member.effort}`)
         : e.command
-    return track($, member?.id, () => next({ ...e, command }))
+    return delegate($, member?.id, () => next({ ...e, command }))
+  }).catch(($, e, next) => next(e))
+
+  // A turn ended: background Codex runs that finished since are reported back.
+  on('classic.Stop', async ($, e, next) => {
+    await settleShells($, (e as { background_tasks?: { id: string }[] }).background_tasks)
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -355,8 +414,11 @@ export const register: Register = on => {
     }
 
     const confirming = await read($, confirmReset)
-    const safe = SERVICES.filter(s => (access[s] ?? 'reads') !== 'all').length
-    const custom = SERVICES.some(s => (access[s] ?? 'reads') !== 'reads')
+    const cfg = await read($, config)
+    const mine = cfg.services
+    const guarded = cfg.codex ? mine.filter(s => CODEX_GUARDED.includes(s)) : []
+    const safe = mine.filter(s => (access[s] ?? 'reads') !== 'all').length
+    const custom = mine.some(s => (access[s] ?? 'reads') !== 'reads')
 
     // One titled card: a rounded border, a header with an optional status on the right.
     const card = (key: string, title: string, subtitle: string, status: { text: string; color: string } | undefined, body: RenderChildren) => (
@@ -443,11 +505,18 @@ export const register: Register = on => {
       'access',
       'Service access',
       'What the crew may do in each service without asking you. Applies to every Claude member right away.',
-      custom
-        ? { text: `Custom · ${safe}/${SERVICES.length} guarded`, color: 'warning' }
-        : { text: '✓ Recommended', color: 'success' },
+      mine.length === 0
+        ? undefined
+        : custom
+          ? { text: `Custom · ${safe}/${mine.length} guarded`, color: 'warning' }
+          : { text: '✓ Recommended', color: 'success' },
       <Box flexDirection="column" gap="sm">
-        {SERVICES.map(s => (
+        {mine.length === 0 && (
+          <Text size="footnote" dimColor>
+            No services chosen. Run install.sh again, or list them under "services" in ~/.claude/crew.json.
+          </Text>
+        )}
+        {mine.map(s => (
           <Select
             key={`perm-${s}`}
             label={SERVICE_LABEL[s]}
@@ -456,12 +525,14 @@ export const register: Register = on => {
             onSelect={v => setPerm(s, v as PermMode)}
           />
         ))}
-        <Box flexDirection="column" gap="xs" paddingX="sm" paddingY="xs" borderStyle="round" borderDimColor>
-          <Text size="footnote" weight="semibold">{'\u{1F6E1} Codex: read-only for PostHog and Cloudflare'}</Text>
-          <Text size="footnote" dimColor>
-            Crew guard blocks every Codex write there. Those changes come back to a Claude member, where you are asked.
-          </Text>
-        </Box>
+        {guarded.length > 0 && (
+          <Box flexDirection="column" gap="xs" paddingX="sm" paddingY="xs" borderStyle="round" borderDimColor>
+            <Text size="footnote" weight="semibold">{`\u{1F6E1} Codex: read-only for ${names(guarded)}`}</Text>
+            <Text size="footnote" dimColor>
+              Crew guard blocks every Codex write there. Those changes come back to a Claude member, where you are asked.
+            </Text>
+          </Box>
+        )}
       </Box>,
     )
 
